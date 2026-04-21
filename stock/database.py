@@ -44,3 +44,25 @@ def ensure_table(conn: sqlite3.Connection, table: str, content_columns: list[str
         if c not in existing:
             conn.execute(f'ALTER TABLE "{table}" ADD COLUMN "{c}" TEXT')
     conn.commit()
+
+
+def ensure_is_refreshed_column(conn: sqlite3.Connection, table: str) -> bool:
+    """
+    仅保证系统列 is_refreshed 存在。
+    返回是否执行了新增列（True=本次新增）。
+    """
+    cur = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        (table,),
+    )
+    if cur.fetchone() is None:
+        return False
+    info = conn.execute(f'PRAGMA table_info("{table}")').fetchall()
+    existing = {row[1] for row in info}
+    if "is_refreshed" in existing:
+        return False
+    conn.execute(
+        f'ALTER TABLE "{table}" ADD COLUMN "is_refreshed" INTEGER NOT NULL DEFAULT 0'
+    )
+    conn.commit()
+    return True

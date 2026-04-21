@@ -4,7 +4,7 @@ from datetime import date
 
 from stock import config
 from stock.business_days import retention_allowed_dates
-from stock.database import connect
+from stock.database import connect, ensure_is_refreshed_column
 from stock.repository import (
     clear_new_flag_when_not_today,
     delete_expired_rows_by_expiration_date,
@@ -24,6 +24,7 @@ def run_maintenance(
     allowed = retention_allowed_dates(config.RETAIN_BUSINESS_DAYS, d)
     conn = connect()
     try:
+        ensure_is_refreshed_column(conn, table)
         deleted = delete_rows_outside_allowed_dates(conn, table, allowed)
         expired_deleted = delete_expired_rows_by_expiration_date(conn, table, d)
         cleared = clear_new_flag_when_not_today(conn, table, d)
