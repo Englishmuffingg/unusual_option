@@ -26,6 +26,7 @@ def ensure_table(conn: sqlite3.Connection, table: str, content_columns: list[str
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 recorded_at TEXT NOT NULL,
                 is_new INTEGER NOT NULL DEFAULT 1,
+                is_refreshed INTEGER NOT NULL DEFAULT 0,
                 {cols_sql}
             )
             '''
@@ -35,6 +36,10 @@ def ensure_table(conn: sqlite3.Connection, table: str, content_columns: list[str
 
     info = conn.execute(f'PRAGMA table_info("{table}")').fetchall()
     existing = {row[1] for row in info}
+    if "is_refreshed" not in existing:
+        conn.execute(
+            f'ALTER TABLE "{table}" ADD COLUMN "is_refreshed" INTEGER NOT NULL DEFAULT 0'
+        )
     for c in content_columns:
         if c not in existing:
             conn.execute(f'ALTER TABLE "{table}" ADD COLUMN "{c}" TEXT')
