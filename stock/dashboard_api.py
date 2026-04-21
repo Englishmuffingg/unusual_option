@@ -1,22 +1,40 @@
 from __future__ import annotations
 
 import argparse
+import sys
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
-from stock.dashboard import (
-    DB_PATH,
-    dte_profile,
-    focused_contracts,
-    get_focus_tickers,
-    load_table_read_only,
-    normalize_df,
-    strike_profile,
-    summarize_by_ticker,
-)
+try:
+    from stock.dashboard import (
+        DB_PATH,
+        dte_profile,
+        focused_contracts,
+        get_focus_tickers,
+        load_table_read_only,
+        normalize_df,
+        strike_profile,
+        summarize_by_ticker,
+    )
+except ModuleNotFoundError:
+    # 兼容从非项目根目录直接运行脚本（例如：cd stock 后 python dashboard_api.py）
+    project_root = Path(__file__).resolve().parent.parent
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+    from stock.dashboard import (  # type: ignore
+        DB_PATH,
+        dte_profile,
+        focused_contracts,
+        get_focus_tickers,
+        load_table_read_only,
+        normalize_df,
+        strike_profile,
+        summarize_by_ticker,
+    )
 
 FOCUS_TICKERS = ["SPY", "GLD", "QQQ", "MSFT"]
 
