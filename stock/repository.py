@@ -91,6 +91,27 @@ def delete_rows_outside_allowed_dates(
     return cur.rowcount if cur.rowcount is not None else 0
 
 
+def delete_expired_rows_by_expiration_date(
+    conn: sqlite3.Connection, table: str, today: date | None = None
+) -> int:
+    """
+    删除 expiration_date 早于今天的过期行。
+    仅处理可被 SQLite date() 识别的日期字符串。
+    """
+    d = (today or date.today()).isoformat()
+    cur = conn.execute(
+        f"""
+        DELETE FROM "{table}"
+        WHERE expiration_date IS NOT NULL
+          AND date(expiration_date) IS NOT NULL
+          AND date(expiration_date) < ?
+        """,
+        (d,),
+    )
+    conn.commit()
+    return cur.rowcount if cur.rowcount is not None else 0
+
+
 def ingest_dataframe(
     df: pd.DataFrame, *, table: str | None = None
 ) -> tuple[int, int, int]:
