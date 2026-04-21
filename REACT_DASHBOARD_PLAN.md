@@ -45,12 +45,9 @@
 1. 后端（API）
    ```bash
    pip install -r requirements.txt
-   # 方式A：直接运行脚本（推荐）
+   pip uninstall -y stock
+   # 只用这一条启动（推荐且最稳）
    python run_dashboard_api.py --host 127.0.0.1 --port 8000 --reload
-   # 方式A-2：模块方式（需在项目根目录）
-   python -m stock.dashboard_api --host 127.0.0.1 --port 8000 --reload
-   # 方式B：uvicorn 命令
-   uvicorn stock.dashboard_api:app --reload --host 127.0.0.1 --port 8000
    ```
    > 不要执行 `pip install stock`，这里的 `stock` 是项目内包名，不是你要安装的第三方包。
 2. 前端（React）

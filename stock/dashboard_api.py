@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -8,6 +9,7 @@ from typing import Any
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, Response
 
 try:
     from stock.dashboard import (
@@ -152,9 +154,29 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/", response_class=HTMLResponse)
+def index() -> str:
+    return """
+    <html>
+      <head><meta charset="utf-8"><title>Unusual Options Dashboard API</title></head>
+      <body style="font-family: Arial, sans-serif; padding: 20px;">
+        <h2>Unusual Options Dashboard API 已启动</h2>
+        <p>这是 JSON API 服务，接口默认返回紧凑 JSON（单行显示是正常的）。</p>
+        <ul>
+          <li><a href="/api/health">/api/health</a></li>
+          <li><a href="/api/dashboard?table=stock&pretty=1">/api/dashboard?table=stock&pretty=1</a></li>
+          <li><a href="/api/dashboard?table=etf&pretty=1">/api/dashboard?table=etf&pretty=1</a></li>
+          <li><a href="/docs">/docs</a> (Swagger)</li>
+        </ul>
+      </body>
+    </html>
+    """
+
+
 @app.get("/api/dashboard")
 def dashboard(
     table: str = Query("stock", pattern="^(stock|etf)$"),
+    pretty: int = Query(0, ge=0, le=1, description="1=格式化输出 JSON，便于浏览器阅读"),
 ) -> dict[str, Any]:
     try:
         raw = load_table_read_only(DB_PATH, table)
@@ -195,7 +217,7 @@ def dashboard(
         "strongest_focus_ticker": strongest_focus,
     }
 
-    return {
+    payload = {
         "table": table,
         "db_path": str(DB_PATH),
         "cards": cards,
@@ -214,6 +236,12 @@ def dashboard(
             "overall": overall_section,
         },
     }
+    if pretty == 1:
+        return Response(
+            content=json.dumps(payload, ensure_ascii=False, indent=2),
+            media_type="application/json; charset=utf-8",
+        )
+    return payload
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -240,12 +268,12 @@ def main() -> None:
     print(
         f"[dashboard_api] 启动中: http://{args.host}:{args.port}/api/dashboard?table=stock"
     )
-    uvicorn.run(
-        "stock.dashboard_api:app",
-        host=args.host,
-        port=args.port,
-        reload=args.reload,
-    )
+    if args.reload:
+        print(
+            "[dashboard_api] 提示：直接运行脚本时已关闭 --reload 以避免模块路径歧义；"
+            "如需热重载，请使用 `python run_dashboard_api.py --reload`。"
+        )
+    uvicorn.run(app, host=args.host, port=args.port, reload=False)
 
 
 if __name__ == "__main__":
