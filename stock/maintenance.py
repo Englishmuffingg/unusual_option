@@ -7,6 +7,7 @@ from stock.business_days import retention_allowed_dates
 from stock.database import connect
 from stock.repository import (
     clear_new_flag_when_not_today,
+    delete_expired_rows_by_expiration_date,
     delete_rows_outside_allowed_dates,
 )
 
@@ -24,11 +25,14 @@ def run_maintenance(
     conn = connect()
     try:
         deleted = delete_rows_outside_allowed_dates(conn, table, allowed)
+        expired_deleted = delete_expired_rows_by_expiration_date(conn, table, d)
         cleared = clear_new_flag_when_not_today(conn, table, d)
         dates_str = ", ".join(sorted(x.isoformat() for x in allowed))
         print(
             f"[{table}] 维护：仅保留最近 {config.RETAIN_BUSINESS_DAYS} 个工作日（日期：{dates_str}）；"
-            f"删除不在上述日期内的行 {deleted}；清除非今日 NEW 标记 {cleared} 行"
+            f"删除不在上述日期内的行 {deleted}；"
+            f"删除 expiration_date 早于 {d.isoformat()} 的过期行 {expired_deleted}；"
+            f"清除非今日 NEW 标记 {cleared} 行"
         )
     finally:
         conn.close()
