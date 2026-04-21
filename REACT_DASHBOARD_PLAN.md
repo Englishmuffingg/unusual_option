@@ -45,7 +45,9 @@
 1. 后端（API）
    ```bash
    pip install -r requirements.txt
-   pip install fastapi uvicorn
+   # 方式A：直接运行脚本（推荐）
+   python -m stock.dashboard_api --host 127.0.0.1 --port 8000 --reload
+   # 方式B：uvicorn 命令
    uvicorn stock.dashboard_api:app --reload --host 127.0.0.1 --port 8000
    ```
 2. 前端（React）
@@ -55,4 +57,3 @@
    npm run dev
    ```
 3. 打开 `http://127.0.0.1:5173`
-

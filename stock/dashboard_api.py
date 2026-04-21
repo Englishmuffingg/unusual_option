@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 from typing import Any
 
 import pandas as pd
@@ -195,3 +196,39 @@ def dashboard(
             "overall": overall_section,
         },
     }
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="启动异常期权 Dashboard API 服务")
+    parser.add_argument("--host", default="127.0.0.1", help="监听地址，默认 127.0.0.1")
+    parser.add_argument("--port", type=int, default=8000, help="监听端口，默认 8000")
+    parser.add_argument(
+        "--reload",
+        action="store_true",
+        help="开发模式自动重载（需要从项目根目录启动）",
+    )
+    return parser
+
+
+def main() -> None:
+    parser = _build_parser()
+    args = parser.parse_args()
+    try:
+        import uvicorn
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError(
+            "缺少 uvicorn，请先执行 `pip install -r requirements.txt`。"
+        ) from exc
+    print(
+        f"[dashboard_api] 启动中: http://{args.host}:{args.port}/api/dashboard?table=stock"
+    )
+    uvicorn.run(
+        "stock.dashboard_api:app",
+        host=args.host,
+        port=args.port,
+        reload=args.reload,
+    )
+
+
+if __name__ == "__main__":
+    main()
