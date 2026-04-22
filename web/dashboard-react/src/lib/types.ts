@@ -27,6 +27,7 @@ export type SectionPayload = {
   }>
   dte_profile: Array<{ ticker: string; dte_bucket: string; total_est_premium: number; total_volume: number }>
   strike_profile: Array<{ ticker: string; option_type: string; strike: number; total_est_premium: number; rows: number }>
+  contracts: Array<Record<string, string | number>>
   focus_blocks: FocusBlock[]
   best_ticker: string
 }
@@ -50,6 +51,19 @@ export type DashboardResponse = {
   db_path: string
   cards: Record<string, number | string>
   metric_explanations: string[]
+  refresh_delta: {
+    snapshot_time: string | null
+    previous_snapshot_time: string | null
+    contract_count_delta: number
+    options_volume_delta: number
+    estimated_premium_delta: number
+    open_interest_delta: number
+    new_contract_count: number
+    disappeared_contract_count: number
+    persistent_contract_count: number
+    ticker_rank: Array<{ ticker: string; premium_delta: number; volume_delta: number; contract_count_delta: number }>
+    contract_changes: Array<Record<string, string | number>>
+  }
   sections: {
     refreshed: SectionPayload
     today_new: SectionPayload

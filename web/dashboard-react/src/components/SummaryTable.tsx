@@ -47,11 +47,11 @@ export function SummaryTable({ title, data }: Props) {
   })
 
   return (
-    <div className="rounded-xl border border-slate-800 bg-slate-900 p-3">
+    <div className="rounded-xl border border-slate-200 bg-white p-3">
       <div className="mb-2 flex flex-wrap items-center gap-2">
         <h3 className="text-sm font-semibold">{title}</h3>
-        <input className="rounded bg-slate-800 px-2 py-1 text-xs" placeholder="筛选 ticker" value={keyword} onChange={(e) => setKeyword(e.target.value)} />
-        <button className={`rounded px-2 py-1 text-xs ${focusOnly ? 'bg-amber-500 text-black' : 'bg-slate-700'}`} onClick={() => setFocusOnly((v) => !v)}>
+        <input className="rounded border border-slate-300 bg-slate-50 px-2 py-1 text-xs" placeholder="筛选 ticker" value={keyword} onChange={(e) => setKeyword(e.target.value)} />
+        <button className={`rounded px-2 py-1 text-xs ${focusOnly ? 'bg-amber-200 text-amber-900' : 'bg-slate-200 text-slate-700'}`} onClick={() => setFocusOnly((v) => !v)}>
           {focusOnly ? 'Focus:开' : 'Focus:关'}
         </button>
       </div>
@@ -59,7 +59,7 @@ export function SummaryTable({ title, data }: Props) {
         <table className="min-w-full text-xs">
           <thead>
             {table.getHeaderGroups().map((hg) => (
-              <tr key={hg.id} className="border-b border-slate-700">
+              <tr key={hg.id} className="border-b border-slate-200">
                 {hg.headers.map((h) => (
                   <th key={h.id} className="cursor-pointer px-2 py-2 text-left" onClick={h.column.getToggleSortingHandler()}>
                     {flexRender(h.column.columnDef.header, h.getContext())}
@@ -71,14 +71,14 @@ export function SummaryTable({ title, data }: Props) {
           <tbody>
             {table.getRowModel().rows.map((row) => (
               <React.Fragment key={row.id}>
-                <tr className="border-b border-slate-800 hover:bg-slate-800/60" onClick={() => setExpanded((s) => ({ ...s, [row.id]: !s[row.id] }))}>
+                <tr className="border-b border-slate-100 hover:bg-slate-100" onClick={() => setExpanded((s) => ({ ...s, [row.id]: !s[row.id] }))}>
                   {row.getVisibleCells().map((cell) => (
                     <td key={cell.id} className="px-2 py-2">{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>
                   ))}
                 </tr>
                 {expanded[row.id] && (
-                  <tr className="bg-slate-800/40">
-                    <td colSpan={11} className="px-2 py-2 text-slate-300">
+                  <tr className="bg-slate-50">
+                    <td colSpan={11} className="px-2 py-2 text-slate-600">
                       详情：刷新占比 {(row.original.refreshed_row_pct * 100 || 0).toFixed(1)}%，今日新增占比 {(row.original.new_row_pct * 100 || 0).toFixed(1)}%。
                     </td>
                   </tr>
