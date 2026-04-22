@@ -48,6 +48,7 @@ export default function App() {
           subtitle="刚刚这一轮新增了什么：ticker 排行、方向、期限、重点合约"
           section={data.sections.refreshed}
           focusTitle="本次刷新 Focus 标的（SPY/GLD/QQQ/MSFT）"
+          refreshDelta={data.refresh_delta}
         />
       )}
 
