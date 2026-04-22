@@ -139,6 +139,35 @@ def _section_payload(df: pd.DataFrame, name: str, dataset_name: str) -> dict[str
 
     bubble = summary[["ticker", "median_dte", "bullish_score", "total_est_premium", "avg_ratio", "flow_desc"]].fillna(0).to_dict("records") if not summary.empty else []
 
+    contracts_cols = [
+        "ticker",
+        "contract_symbol",
+        "contract_display_name",
+        "option_type",
+        "strike",
+        "expiration_date",
+        "dte",
+        "options_volume",
+        "open_interest",
+        "volume_to_open_interest_ratio",
+        "estimated_premium",
+        "is_refreshed",
+        "is_new",
+        "recorded_at",
+    ]
+    contracts_cols = [c for c in contracts_cols if c in df.columns]
+
+    contracts = []
+    if contracts_cols:
+        contracts = (
+            df[contracts_cols]
+            .copy()
+            .sort_values(["estimated_premium", "options_volume"], ascending=[False, False])
+            .head(600)
+            .fillna(0)
+            .to_dict("records")
+        )
+
     return {
         "key": name,
         "summary": summary.fillna(0).to_dict("records"),
@@ -146,7 +175,128 @@ def _section_payload(df: pd.DataFrame, name: str, dataset_name: str) -> dict[str
         "dte_profile": dte.to_dict("records"),
         "strike_profile": strikes[["ticker", "option_type", "strike", "total_est_premium", "rows"]].to_dict("records") if not strikes.empty else [],
         "focus_blocks": _focus_blocks(df, summary, dataset_name),
+        "contracts": contracts,
         "best_ticker": best_ticker,
+    }
+
+
+def _build_refresh_delta(df: pd.DataFrame) -> dict[str, Any]:
+    if df.empty or "recorded_at" not in df.columns or "contract_symbol" not in df.columns:
+        return {
+            "snapshot_time": None,
+            "previous_snapshot_time": None,
+            "contract_count_delta": 0,
+            "options_volume_delta": 0,
+            "estimated_premium_delta": 0,
+            "open_interest_delta": 0,
+            "new_contract_count": 0,
+            "disappeared_contract_count": 0,
+            "persistent_contract_count": 0,
+            "ticker_rank": [],
+            "contract_changes": [],
+        }
+
+    work = df.copy()
+    work["recorded_at"] = pd.to_datetime(work["recorded_at"], errors="coerce")
+    work = work[work["recorded_at"].notna()]
+    if work.empty:
+        return {
+            "snapshot_time": None,
+            "previous_snapshot_time": None,
+            "contract_count_delta": 0,
+            "options_volume_delta": 0,
+            "estimated_premium_delta": 0,
+            "open_interest_delta": 0,
+            "new_contract_count": 0,
+            "disappeared_contract_count": 0,
+            "persistent_contract_count": 0,
+            "ticker_rank": [],
+            "contract_changes": [],
+        }
+
+    snapshots = sorted(work["recorded_at"].dropna().unique())
+    latest = snapshots[-1]
+    previous = snapshots[-2] if len(snapshots) >= 2 else None
+
+    current_df = work[work["recorded_at"] == latest].copy()
+    prev_df = work[work["recorded_at"] == previous].copy() if previous is not None else work.iloc[0:0].copy()
+
+    key_cols = ["ticker", "contract_symbol"]
+    agg_map = {
+        "contract_display_name": "first",
+        "option_type": "first",
+        "strike": "first",
+        "expiration_date": "first",
+        "dte": "first",
+        "options_volume": "sum",
+        "open_interest": "sum",
+        "estimated_premium": "sum",
+    }
+
+    cur = current_df.groupby(key_cols, dropna=False).agg(agg_map).reset_index()
+    prev = prev_df.groupby(key_cols, dropna=False).agg(agg_map).reset_index()
+
+    merged = cur.merge(prev, on=key_cols, how="outer", suffixes=("_cur", "_prev"))
+    merged = merged.fillna(0)
+    merged["delta_volume"] = merged["options_volume_cur"] - merged["options_volume_prev"]
+    merged["delta_premium"] = merged["estimated_premium_cur"] - merged["estimated_premium_prev"]
+    merged["delta_open_interest"] = merged["open_interest_cur"] - merged["open_interest_prev"]
+    merged["status"] = "持续"
+    merged.loc[(merged["estimated_premium_prev"] == 0) & (merged["estimated_premium_cur"] > 0), "status"] = "新增"
+    merged.loc[(merged["estimated_premium_prev"] > 0) & (merged["estimated_premium_cur"] == 0), "status"] = "消失"
+    merged.loc[(merged["estimated_premium_prev"] > 0) & (merged["estimated_premium_cur"] > merged["estimated_premium_prev"]), "status"] = "扩大"
+
+    ticker_rank = (
+        merged.groupby("ticker", dropna=False)
+        .agg(
+            premium_delta=("delta_premium", "sum"),
+            volume_delta=("delta_volume", "sum"),
+            contract_count_delta=("contract_symbol", "count"),
+        )
+        .reset_index()
+        .sort_values("premium_delta", ascending=False)
+        .head(15)
+    )
+
+    changes_cols = [
+        "ticker",
+        "contract_symbol",
+        "contract_display_name_cur",
+        "contract_display_name_prev",
+        "option_type_cur",
+        "option_type_prev",
+        "strike_cur",
+        "strike_prev",
+        "expiration_date_cur",
+        "expiration_date_prev",
+        "dte_cur",
+        "dte_prev",
+        "options_volume_cur",
+        "options_volume_prev",
+        "open_interest_cur",
+        "open_interest_prev",
+        "estimated_premium_cur",
+        "estimated_premium_prev",
+        "delta_volume",
+        "delta_premium",
+        "delta_open_interest",
+        "status",
+    ]
+    change_rows = merged[changes_cols].copy()
+    change_rows = change_rows.sort_values("delta_premium", ascending=False).head(800)
+
+    return {
+        "snapshot_time": str(latest),
+        "previous_snapshot_time": str(previous) if previous is not None else None,
+        "contract_count_delta": int(len(cur) - len(prev)),
+        "options_volume_delta": _to_float(cur["options_volume"].sum() - prev["options_volume"].sum(), 0),
+        "estimated_premium_delta": _to_float(cur["estimated_premium"].sum() - prev["estimated_premium"].sum(), 2),
+        "open_interest_delta": _to_float(cur["open_interest"].sum() - prev["open_interest"].sum(), 0),
+        "new_contract_count": int((change_rows["status"] == "新增").sum()),
+        "disappeared_contract_count": int((change_rows["status"] == "消失").sum()),
+        "persistent_contract_count": int((change_rows["status"].isin(["持续", "扩大"])).sum()),
+        "ticker_rank": ticker_rank.fillna(0).to_dict("records"),
+        "contract_changes": change_rows.fillna(0).to_dict("records"),
     }
 
 
@@ -208,6 +358,7 @@ def dashboard(
     cards = {
         "refreshed_ticker_count": int(refreshed_df["ticker"].nunique()) if not refreshed_df.empty else 0,
         "refreshed_contract_count": int(len(refreshed_df)),
+        "refreshed_total_premium": _to_float(refreshed_df["estimated_premium"].sum(), 2) if not refreshed_df.empty else 0,
         "today_new_ticker_count": int(today_new_df["ticker"].nunique()) if not today_new_df.empty else 0,
         "today_new_contract_count": int(len(today_new_df)),
         "overall_ticker_count": int(df["ticker"].nunique()) if not df.empty else 0,
@@ -236,6 +387,7 @@ def dashboard(
             "today_new": today_section,
             "overall": overall_section,
         },
+        "refresh_delta": _build_refresh_delta(df),
     }
     json_payload = jsonable_encoder(payload)
     if pretty == 1:
