@@ -7,6 +7,7 @@ type Props = {
 const items = [
   { k: 'refreshed_ticker_count', t: '本次刷新新增 ticker 数', i: Activity },
   { k: 'refreshed_contract_count', t: '本次刷新新增异常合约数', i: Target },
+  { k: 'refreshed_total_premium', t: '本次刷新新增总 premium', i: BarChart3 },
   { k: 'today_new_ticker_count', t: '今日新增 ticker 数', i: Activity },
   { k: 'today_new_contract_count', t: '今日新增异常合约数', i: Target },
   { k: 'overall_ticker_count', t: '当前整体异常 ticker 数', i: BarChart3 },

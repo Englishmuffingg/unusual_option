@@ -36,9 +36,15 @@ export default function App() {
           </div>
         </div>
         {loading && <div className="text-sm text-slate-300">加载中...</div>}
-        {err && <div className="text-sm text-rose-400">{err}</div>}
+        {err && <div className="text-sm text-rose-400">数据加载失败：{err}。请确认 Python API 已启动在 8000 端口。</div>}
         {data && <SummaryCards cards={data.cards} />}
       </header>
+
+      {!loading && !data && !err && (
+        <div className="rounded-xl border border-amber-700/40 bg-slate-900 p-4 text-sm text-amber-300">
+          暂无数据：请先启动 API（`python run_dashboard_api.py --host 127.0.0.1 --port 8000`），再刷新页面。
+        </div>
+      )}
 
       {data && <MetricGuide items={data.metric_explanations} />}
 
@@ -48,6 +54,7 @@ export default function App() {
           subtitle="刚刚这一轮新增了什么：ticker 排行、方向、期限、重点合约"
           section={data.sections.refreshed}
           focusTitle="本次刷新 Focus 标的（SPY/GLD/QQQ/MSFT）"
+          refreshDelta={data.refresh_delta}
         />
       )}
 
