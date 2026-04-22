@@ -27,6 +27,8 @@ type RawContract = {
   strike?: number
   option_type?: string
   dte?: number
+  previous_options_volume?: number
+  previous_open_interest?: number
 }
 
 type ContractRow = {
@@ -48,11 +50,14 @@ type ContractRow = {
   strike: number
   optionType: 'Call' | 'Put'
   dte: number
+  previousOptionsVolume: number | null
+  previousOpenInterest: number | null
 }
 
 type StrikeBucket = { label: string; min: number; max: number; volume: number }
 
 const CARD_CLASS = 'rounded-2xl border border-slate-200 bg-white p-4 shadow-sm'
+const ACTIVITY_TOP_N = 8
 
 const dteLabelMap: Record<DteFilter, string> = {
   all: '全部',
@@ -89,6 +94,8 @@ function normalizeRow(raw: RawContract, idx: number): ContractRow {
     strike: toNumber(raw.strike),
     optionType,
     dte: toNumber(raw.dte),
+    previousOptionsVolume: raw.previous_options_volume == null ? null : toNumber(raw.previous_options_volume),
+    previousOpenInterest: raw.previous_open_interest == null ? null : toNumber(raw.previous_open_interest),
   }
 }
 
@@ -96,6 +103,19 @@ function formatCompact(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`
   return `${Math.round(n)}`
+}
+
+function formatShortDate(dateStr: string): string {
+  if (!dateStr || dateStr === '-') return '-'
+  const parts = dateStr.split('-')
+  if (parts.length >= 3) return `${parts[1]}-${parts[2]}`
+  return dateStr
+}
+
+function formatShortTime(ts: string): string {
+  if (!ts || ts === '-') return '-'
+  const match = ts.match(/(\d{2}:\d{2})/)
+  return match?.[1] ?? ts
 }
 
 function dteBucket(dte: number): DteFilter {
@@ -152,6 +172,9 @@ export default function App() {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
   const [selectedContract, setSelectedContract] = useState<string | null>(null)
   const [selectedStrikeRange, setSelectedStrikeRange] = useState<{ min: number; max: number } | null>(null)
+  const [selectionSource, setSelectionSource] = useState<string | null>(null)
+  const [newExpanded, setNewExpanded] = useState(false)
+  const [newSort, setNewSort] = useState<'volume' | 'vol_oi' | 'time'>('volume')
 
   const [tableSort, setTableSort] = useState<{ key: keyof ContractRow; dir: 'asc' | 'desc' }>({
     key: 'optionsVolume',
@@ -181,11 +204,10 @@ export default function App() {
       if (dteFilter !== 'all' && dteBucket(row.dte) !== dteFilter) return false
       if (statusFilter === 'new' && !row.isNew) return false
       if (statusFilter === 'continuing' && row.isNew) return false
-      if (selectedContract && row.contractSymbol !== selectedContract) return false
       if (selectedStrikeRange && (row.strike < selectedStrikeRange.min || row.strike > selectedStrikeRange.max)) return false
       return true
     })
-  }, [rows, selectedTicker, optionFilter, dteFilter, statusFilter, selectedContract, selectedStrikeRange])
+  }, [rows, selectedTicker, optionFilter, dteFilter, statusFilter, selectedStrikeRange])
 
   const tickerStats = useMemo(() => {
     const m = new Map<string, { total: number; newVolume: number; volOi: number; call: number; put: number; count: number }>()
@@ -255,12 +277,19 @@ export default function App() {
     }
   }, [filteredRows])
 
-  const newRows = useMemo(
-    () => filteredRows.filter((r) => r.isNew).sort((a, b) => b.optionsVolume - a.optionsVolume).slice(0, 8),
-    [filteredRows],
-  )
+  const newRowsAll = useMemo(() => {
+    const sorted = filteredRows.filter((r) => r.isNew)
+    if (newSort === 'volume') return sorted.sort((a, b) => b.optionsVolume - a.optionsVolume)
+    if (newSort === 'vol_oi') return sorted.sort((a, b) => b.volOi - a.volOi)
+    return sorted.sort((a, b) => String(b.recordedAt).localeCompare(String(a.recordedAt)))
+  }, [filteredRows, newSort])
+  const newRows = useMemo(() => (newExpanded ? newRowsAll : newRowsAll.slice(0, ACTIVITY_TOP_N)), [newExpanded, newRowsAll])
   const continuingRows = useMemo(
-    () => filteredRows.filter((r) => !r.isNew || r.isRefreshed).sort((a, b) => b.optionsVolume - a.optionsVolume).slice(0, 8),
+    () =>
+      filteredRows
+        .filter((r) => !r.isNew || r.isRefreshed)
+        .sort((a, b) => b.optionsVolume - a.optionsVolume)
+        .slice(0, ACTIVITY_TOP_N),
     [filteredRows],
   )
 
@@ -273,7 +302,18 @@ export default function App() {
     return labels.map((k) => ({ key: k, label: dteLabelMap[k], value: totalBy.get(k) ?? 0, max }))
   }, [filteredRows])
 
-  const strikeChartData = useMemo(() => strikeBuckets(filteredRows), [filteredRows])
+  const strikeChartData = useMemo(() => {
+    if (selectedTicker) {
+      const strikeMap = new Map<number, number>()
+      filteredRows.forEach((r) => strikeMap.set(r.strike, (strikeMap.get(r.strike) ?? 0) + r.optionsVolume))
+      return Array.from(strikeMap.entries())
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 15)
+        .map(([strike, volume]) => ({ label: String(strike), min: strike, max: strike, volume }))
+        .sort((a, b) => a.min - b.min)
+    }
+    return strikeBuckets(filteredRows)
+  }, [filteredRows, selectedTicker])
 
   const signalChips = useMemo(() => {
     const chips: string[] = []
@@ -330,6 +370,9 @@ export default function App() {
     setStatusFilter('all')
     setSelectedContract(null)
     setSelectedStrikeRange(null)
+    setSelectionSource(null)
+    setNewExpanded(false)
+    setNewSort('volume')
   }
 
   const onSortHeader = (key: keyof ContractRow) => {
@@ -458,9 +501,37 @@ export default function App() {
             )}
           </section>
 
-          <section className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-            <ActivityPanel title="新增活动" rows={newRows} onSelect={setSelectedContract} selected={selectedContract} />
-            <ActivityPanel title="延续活动" rows={continuingRows} onSelect={setSelectedContract} selected={selectedContract} />
+          <section className={CARD_CLASS}>
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h2 className="text-lg font-semibold">新增活动</h2>
+                <p className="mt-1 text-xs text-slate-500">默认展示前 {ACTIVITY_TOP_N} 条，可展开查看全部新增合约。</p>
+              </div>
+              <label className="text-xs text-slate-500">
+                排序：
+                <select value={newSort} onChange={(e) => setNewSort(e.target.value as 'volume' | 'vol_oi' | 'time')} className="ml-1 rounded border border-slate-300 px-2 py-1 text-xs text-slate-700">
+                  <option value="volume">按成交量</option>
+                  <option value="vol_oi">按 Vol/OI</option>
+                  <option value="time">按时间</option>
+                </select>
+              </label>
+            </div>
+            <NewActivityPanel
+              rows={newRows}
+              onSelect={(contract) => {
+                setSelectedContract(contract)
+                setSelectionSource(contract ? '新增活动' : null)
+              }}
+              selected={selectedContract}
+            />
+            <div className="mt-3">
+              <button
+                onClick={() => setNewExpanded((v) => !v)}
+                className="rounded-lg border border-slate-300 px-3 py-1 text-sm hover:bg-slate-50"
+              >
+                {newExpanded ? '收起新增合约' : `查看全部新增合约（${newRowsAll.length} 条）`}
+              </button>
+            </div>
           </section>
 
           <section className={CARD_CLASS}>
@@ -469,8 +540,26 @@ export default function App() {
               <div>
                 <div className="mb-2 font-medium">Call / Put 构成</div>
                 <div className="h-8 overflow-hidden rounded-full border border-slate-200">
-                  <button style={{ width: `${summary.callShare * 100}%` }} className="h-full bg-emerald-500 text-xs text-white" onClick={() => setOptionFilter('call')}>Call {(summary.callShare * 100).toFixed(1)}%</button>
-                  <button style={{ width: `${summary.putShare * 100}%` }} className="h-full bg-rose-500 text-xs text-white" onClick={() => setOptionFilter('put')}>Put {(summary.putShare * 100).toFixed(1)}%</button>
+                  <button
+                    style={{ width: `${summary.callShare * 100}%` }}
+                    className="h-full bg-emerald-500 text-xs text-white"
+                    onClick={() => {
+                      setOptionFilter('call')
+                      setSelectionSource('Call/Put 构成图')
+                    }}
+                  >
+                    Call {(summary.callShare * 100).toFixed(1)}%
+                  </button>
+                  <button
+                    style={{ width: `${summary.putShare * 100}%` }}
+                    className="h-full bg-rose-500 text-xs text-white"
+                    onClick={() => {
+                      setOptionFilter('put')
+                      setSelectionSource('Call/Put 构成图')
+                    }}
+                  >
+                    Put {(summary.putShare * 100).toFixed(1)}%
+                  </button>
                 </div>
                 <button onClick={() => setOptionFilter('all')} className="mt-2 text-xs text-slate-500 underline">清除方向筛选</button>
               </div>
@@ -479,7 +568,14 @@ export default function App() {
                 <div className="mb-2 font-medium">DTE 分布</div>
                 <div className="space-y-2">
                   {dteChartData.map((d) => (
-                    <button key={d.key} onClick={() => setDteFilter(d.key)} className="block w-full text-left text-xs">
+                    <button
+                      key={d.key}
+                      onClick={() => {
+                        setDteFilter(d.key)
+                        setSelectionSource('DTE 分布')
+                      }}
+                      className="block w-full text-left text-xs"
+                    >
                       <div className="mb-1 flex justify-between"><span>{d.label}</span><span>{formatCompact(d.value)}</span></div>
                       <div className="h-2 rounded bg-slate-100">
                         <div className={`h-full rounded ${dteFilter === d.key ? 'bg-slate-900' : 'bg-sky-500'}`} style={{ width: `${(d.value / d.max) * 100}%` }} />
@@ -497,7 +593,14 @@ export default function App() {
                     const maxV = Math.max(...strikeChartData.map((v) => v.volume), 1)
                     const active = selectedStrikeRange && Math.abs(selectedStrikeRange.min - b.min) < 0.001 && Math.abs(selectedStrikeRange.max - b.max) < 0.001
                     return (
-                      <button key={b.label} onClick={() => setSelectedStrikeRange({ min: b.min, max: b.max })} className="block w-full text-left text-xs">
+                      <button
+                        key={b.label}
+                        onClick={() => {
+                          setSelectedStrikeRange({ min: b.min, max: b.max })
+                          setSelectionSource('Strike 分布')
+                        }}
+                        className="block w-full text-left text-xs"
+                      >
                         <div className="mb-1 flex justify-between"><span>{b.label}</span><span>{formatCompact(b.volume)}</span></div>
                         <div className="h-2 rounded bg-slate-100"><div className={`h-full rounded ${active ? 'bg-slate-900' : 'bg-violet-500'}`} style={{ width: `${(b.volume / maxV) * 100}%` }} /></div>
                       </button>
@@ -519,9 +622,33 @@ export default function App() {
           </section>
 
           <section className={CARD_CLASS}>
+            <h2 className="mb-3 text-lg font-semibold">延续活动</h2>
+            <p className="mb-3 text-xs text-slate-500">侧重展示合约延续情况与变化信息（含 OI 变化占位）。</p>
+            <ContinuingActivityPanel
+              rows={continuingRows}
+              onSelect={(contract) => {
+                setSelectedContract(contract)
+                setSelectionSource(contract ? '延续活动' : null)
+              }}
+              selected={selectedContract}
+            />
+          </section>
+
+          <section className={CARD_CLASS}>
             <div className="mb-3 flex items-center justify-between">
               <h2 className="text-lg font-semibold">明细验证表格</h2>
-              <div className="text-sm text-slate-500">共 {sortedTableRows.length} 条</div>
+              <div className="text-right text-sm text-slate-500">
+                <div>共 {sortedTableRows.length} 条</div>
+                {selectionSource ? <div>来源：{selectionSource}</div> : null}
+              </div>
+            </div>
+            <div className="mb-3 flex flex-wrap gap-2">
+              <span className="rounded-full border border-slate-300 bg-slate-50 px-3 py-1 text-xs">{source.toUpperCase()}</span>
+              {activeFilters.map((f) => (
+                <span key={`table-${f.key}`} className="rounded-full border border-slate-300 bg-slate-50 px-3 py-1 text-xs">
+                  {f.label}
+                </span>
+              ))}
             </div>
             {sortedTableRows.length === 0 ? (
               <div className="text-sm text-slate-500">当前筛选下没有匹配数据。</div>
@@ -607,52 +734,96 @@ function Fact({ label, value }: { label: string; value: string }) {
   )
 }
 
-function ActivityPanel({
-  title,
-  rows,
-  onSelect,
-  selected,
-}: {
-  title: string
-  rows: ContractRow[]
-  onSelect: (s: string | null) => void
-  selected: string | null
-}) {
+function NewActivityPanel({ rows, onSelect, selected }: { rows: ContractRow[]; onSelect: (s: string | null) => void; selected: string | null }) {
   const maxVolume = Math.max(...rows.map((r) => r.optionsVolume), 1)
   return (
-    <section className={CARD_CLASS}>
-      <h2 className="mb-3 text-lg font-semibold">{title}</h2>
-      {rows.length === 0 ? (
-        <div className="text-sm text-slate-500">暂无匹配合约</div>
-      ) : (
-        <div className="space-y-2">
-          {rows.map((r) => (
+    rows.length === 0 ? (
+      <div className="text-sm text-slate-500">暂无匹配合约</div>
+    ) : (
+      <div className="space-y-2">
+        {rows.map((r) => (
+          <button
+            key={r.id}
+            title={`OI ${r.openInterest} / Vol-OI ${r.volOi.toFixed(2)}`}
+            onClick={() => onSelect(selected === r.contractSymbol ? null : r.contractSymbol)}
+            className={`block w-full rounded-xl border p-3 text-left ${selected === r.contractSymbol ? 'border-slate-900 bg-slate-50' : 'border-slate-200'}`}
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
+              <div className="flex items-center gap-2">
+                <span className="rounded bg-rose-100 px-1.5 py-0.5 text-[10px] font-semibold text-rose-700">NEW</span>
+                <span className="font-semibold">{r.contractDisplayName}</span>
+                <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${r.optionType === 'Put' ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700'}`}>
+                  {r.optionType}
+                </span>
+                <span className="text-xs text-slate-500">{formatShortDate(r.expirationDate)}</span>
+              </div>
+              <div className="text-sm font-semibold text-slate-700">{formatCompact(r.optionsVolume)}</div>
+            </div>
+            <div className="mt-1 flex flex-wrap gap-3 text-xs text-slate-500">
+              <span>Strike {r.strike}</span>
+              <span>DTE {r.dte}</span>
+              <span>Vol/OI {r.volOi.toFixed(2)}</span>
+              <span>时间 {formatShortTime(r.recordedAt)}</span>
+            </div>
+            <div className="mt-2 h-2 rounded bg-slate-100">
+              <div
+                className={`h-full rounded ${r.optionType === 'Put' ? 'bg-rose-500' : 'bg-emerald-500'}`}
+                style={{ width: `${(r.optionsVolume / maxVolume) * 100}%` }}
+              />
+            </div>
+          </button>
+        ))}
+      </div>
+    )
+  )
+}
+
+function ContinuingActivityPanel({ rows, onSelect, selected }: { rows: ContractRow[]; onSelect: (s: string | null) => void; selected: string | null }) {
+  return (
+    rows.length === 0 ? (
+      <div className="text-sm text-slate-500">暂无匹配合约</div>
+    ) : (
+      <div className="space-y-2">
+        {rows.map((r) => {
+          const prevVol = r.previousOptionsVolume
+          const prevOi = r.previousOpenInterest
+          const deltaVol = prevVol == null ? null : r.optionsVolume - prevVol
+          const deltaOi = prevOi == null ? null : r.openInterest - prevOi
+          const deltaCls = (value: number | null) => (value == null ? 'text-slate-400' : value >= 0 ? 'text-emerald-600' : 'text-rose-600')
+
+          return (
             <button
               key={r.id}
-              title={`OI ${r.openInterest} / Vol-OI ${r.volOi.toFixed(2)}`}
               onClick={() => onSelect(selected === r.contractSymbol ? null : r.contractSymbol)}
-              className={`block w-full rounded-xl border p-2 text-left ${selected === r.contractSymbol ? 'border-slate-900 bg-slate-50' : 'border-slate-200'}`}
+              className={`block w-full rounded-xl border p-3 text-left ${selected === r.contractSymbol ? 'border-slate-900 bg-slate-50' : 'border-slate-200'}`}
             >
-              <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
-                <div className="font-medium">{r.contractDisplayName}</div>
-                <div className="text-slate-500">{formatCompact(r.optionsVolume)}</div>
+              <div className="flex items-center justify-between gap-2">
+                <div className="font-semibold">{r.contractDisplayName}</div>
+                <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${r.optionType === 'Put' ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700'}`}>
+                  {r.optionType}
+                </span>
               </div>
-              <div className="mt-1 flex flex-wrap gap-2 text-xs text-slate-500">
-                <span className={r.optionType === 'Put' ? 'text-rose-600' : 'text-emerald-600'}>{r.optionType}</span>
-                <span>{r.expirationDate}</span>
-                <span>Strike {r.strike}</span>
-                <span>Vol/OI {r.volOi.toFixed(2)}</span>
+              <div className="mt-2 grid grid-cols-1 gap-1 text-xs sm:grid-cols-2">
+                <div className="text-slate-600">
+                  Vol: {prevVol == null ? '—' : formatCompact(prevVol)} → {formatCompact(r.optionsVolume)}
+                </div>
+                <div className={deltaCls(deltaVol)}>
+                  ΔVol: {deltaVol == null ? '待接入' : `${deltaVol >= 0 ? '↑' : '↓'} ${formatCompact(Math.abs(deltaVol))}`}
+                </div>
+                <div className="text-slate-600">
+                  OI: {prevOi == null ? '—' : formatCompact(prevOi)} → {formatCompact(r.openInterest)}
+                </div>
+                <div className={deltaCls(deltaOi)}>
+                  ΔOI: {deltaOi == null ? '待接入' : `${deltaOi >= 0 ? '↑' : '↓'} ${formatCompact(Math.abs(deltaOi))}`}
+                </div>
               </div>
-              <div className="mt-2 h-2 rounded bg-slate-100">
-                <div
-                  className={`h-full rounded ${r.optionType === 'Put' ? 'bg-rose-500' : 'bg-emerald-500'}`}
-                  style={{ width: `${(r.optionsVolume / maxVolume) * 100}%` }}
-                />
+              <div className="mt-2 text-xs text-slate-500">
+                当前 Vol/OI {r.volOi.toFixed(2)} · 到期 {formatShortDate(r.expirationDate)} · Strike {r.strike}
               </div>
             </button>
-          ))}
-        </div>
-      )}
-    </section>
+          )
+        })}
+      </div>
+    )
   )
 }
