@@ -61,7 +61,7 @@ export type DashboardResponse = {
     new_contract_count: number
     disappeared_contract_count: number
     persistent_contract_count: number
-    ticker_rank: Array<{ ticker: string; premium_delta: number; volume_delta: number; contract_count_delta: number }>
+    ticker_rank: Array<{ ticker: string; premium_delta: number; volume_delta: number; open_interest_delta: number; contract_count_delta: number }>
     contract_changes: Array<Record<string, string | number>>
   }
   sections: {

@@ -1,7 +1,7 @@
 import { useMemo } from 'react'
 import { Bar, BarChart, CartesianGrid, Cell, ResponsiveContainer, Scatter, ScatterChart, Tooltip, XAxis, YAxis } from 'recharts'
 import { SectionPayload } from '@/lib/types'
-import { dteBucket, flowFromOptionType } from '@/lib/format'
+import { dateDay, dteBucket, flowFromOptionType } from '@/lib/format'
 
 type Props = {
   section: SectionPayload
@@ -15,6 +15,7 @@ type Props = {
   selectedDte?: string | null
   selectedStrikeExp?: { strike: string; expiration: string } | null
   selectedContract?: string | null
+  contractRows?: Array<Record<string, string | number>>
 }
 
 const POS = '#2563eb'
@@ -33,12 +34,13 @@ export function SectionCharts({
   selectedDte,
   selectedStrikeExp,
   selectedContract,
+  contractRows,
 }: Props) {
   const directionData = section.summary.slice(0, 10).map((r) => ({ ticker: r.ticker, score: Number((r.bullish_score * 100).toFixed(1)) }))
 
   const flowDist = useMemo(() => {
     if (section.key === 'refreshed') {
-      const rows = section.contracts
+      const rows = contractRows ?? section.contracts
       const m: Record<string, number> = { 新增: 0, 持续: 0, 扩大: 0, 消失: 0 }
       rows.forEach((r) => {
         const key = String(r.status || '持续')
@@ -48,7 +50,7 @@ export function SectionCharts({
     }
 
     const m: Record<string, number> = {}
-    section.contracts.forEach((r) => {
+    ;(contractRows ?? section.contracts).forEach((r) => {
       const flow = flowFromOptionType(String(r.option_type || ''))
       m[flow] = (m[flow] || 0) + 1
     })
@@ -62,22 +64,22 @@ export function SectionCharts({
       m[bucket] = (m[bucket] || 0) + 1
     })
     return Object.entries(m).map(([bucket, count]) => ({ bucket, count }))
-  }, [section.contracts])
+  }, [section.contracts, contractRows])
 
   const ticker = selectedTicker || section.summary[0]?.ticker
-  const pointRaw = section.contracts
+  const pointRaw = (contractRows ?? section.contracts)
     .filter((r) => String(r.ticker) === ticker)
     .slice(0, 180)
     .map((r) => ({
-      strike: String(r.strike || ''),
-      expiration: String(r.expiration_date || ''),
+      strike: String(r.strike || r.strike_cur || ''),
+      strikeNum: Number(r.strike || r.strike_cur || 0),
+      expiration: dateDay(String(r.expiration_date || r.expiration_date_cur || '')),
       size: Number(r.options_volume || 0),
       contract_symbol: String(r.contract_symbol || ''),
     }))
 
-  const strikeList = Array.from(new Set(pointRaw.map((p) => p.strike)))
   const expList = Array.from(new Set(pointRaw.map((p) => p.expiration)))
-  const strikeExpPoints = pointRaw.map((p) => ({ ...p, x: strikeList.indexOf(p.strike), y: expList.indexOf(p.expiration) }))
+  const strikeExpPoints = pointRaw.filter((p) => Number.isFinite(p.strikeNum)).map((p) => ({ ...p, y: expList.indexOf(p.expiration) }))
 
   return (
     <div className="grid gap-4 xl:grid-cols-2">
@@ -141,13 +143,13 @@ export function SectionCharts({
             <ScatterChart onClick={(st: any) => {
               const p = st?.activePayload?.[0]?.payload
               if (!p) return
-              onSelectStrikeExp?.({ strike: p.strike, expiration: p.expiration })
+                  onSelectStrikeExp?.({ strike: p.strike, expiration: p.expiration })
             }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-              <XAxis type="number" dataKey="x" tickFormatter={(v) => strikeList[v] || ''} stroke="#334155" name="strike" />
+              <XAxis type="number" dataKey="strikeNum" stroke="#334155" name="strike" />
               <YAxis type="number" dataKey="y" tickFormatter={(v) => expList[v] || ''} stroke="#334155" width={120} name="expiration" />
               <Tooltip formatter={(val: any, name: string, props: any) => {
-                if (name === 'x') return props.payload.strike
+                if (name === 'strikeNum') return `strike ${props.payload.strike}`
                 if (name === 'y') return props.payload.expiration
                 return val
               }} />

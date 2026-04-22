@@ -1,6 +1,6 @@
 import { FocusBlock } from '@/lib/types'
 
-type Props = { blocks: FocusBlock[]; title: string; variant?: 'refreshed' | 'today_new' | 'overall' }
+type Props = { blocks: FocusBlock[]; title: string; variant?: 'refreshed' | 'today_new' | 'overall'; oiDeltaByTicker?: Record<string, number> }
 
 function blockHint(variant: 'refreshed' | 'today_new' | 'overall') {
   if (variant === 'refreshed') return '语义：刚刚这一轮“新进入结果集”的变化'
@@ -8,7 +8,7 @@ function blockHint(variant: 'refreshed' | 'today_new' | 'overall') {
   return '语义：当前异常池整体结构与持续活跃层'
 }
 
-export function FocusTickerBlocks({ blocks, title, variant = 'overall' }: Props) {
+export function FocusTickerBlocks({ blocks, title, variant = 'overall', oiDeltaByTicker = {} }: Props) {
   return (
     <div className="rounded-xl border border-slate-200 bg-white p-4">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
@@ -27,6 +27,7 @@ export function FocusTickerBlocks({ blocks, title, variant = 'overall' }: Props)
               <div>Put占比: {(b.put_premium_pct * 100).toFixed(1)}%</div>
               <div>{variant === 'refreshed' ? '本轮刷新新增' : '本次刷新新增'}: {b.refreshed_rows}</div>
               <div>{variant === 'today_new' ? '今日累计新增' : '今日新增'}: {b.new_rows}</div>
+              {variant === 'refreshed' && <div>本轮 OI 变化: {Number(oiDeltaByTicker[b.ticker] || 0).toLocaleString('zh-CN')}</div>}
               <div>median_dte: {b.median_dte}</div>
               <div>avg/max ratio: {b.avg_ratio} / {b.max_ratio}</div>
             </div>

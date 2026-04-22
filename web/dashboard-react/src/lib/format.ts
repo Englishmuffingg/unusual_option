@@ -24,3 +24,8 @@ export function flowFromOptionType(optionType: string): string {
   if (t === 'PUT') return '偏防守'
   return '双向博弈'
 }
+
+export function dateDay(v: string): string {
+  if (!v) return ''
+  return String(v).slice(0, 10)
+}

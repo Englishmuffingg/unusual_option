@@ -251,6 +251,7 @@ def _build_refresh_delta(df: pd.DataFrame) -> dict[str, Any]:
         .agg(
             premium_delta=("delta_premium", "sum"),
             volume_delta=("delta_volume", "sum"),
+            open_interest_delta=("delta_open_interest", "sum"),
             contract_count_delta=("contract_symbol", "count"),
         )
         .reset_index()

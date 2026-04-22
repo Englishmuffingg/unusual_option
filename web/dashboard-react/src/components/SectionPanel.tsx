@@ -22,7 +22,7 @@ type Props = {
     persistent_contract_count: number
     snapshot_time: string | null
     previous_snapshot_time: string | null
-    ticker_rank: Array<{ ticker: string; premium_delta: number; volume_delta: number; contract_count_delta: number }>
+    ticker_rank: Array<{ ticker: string; premium_delta: number; volume_delta: number; open_interest_delta: number; contract_count_delta: number }>
     contract_changes: Array<Record<string, string | number>>
   }
 }
@@ -59,6 +59,15 @@ export function SectionPanel({ title, subtitle, section, focusTitle, refreshDelt
     setSelectedStrikeExp(null)
   }
 
+  const focusOiDeltaByTicker = useMemo(() => {
+    const out: Record<string, number> = {}
+    if (section.key !== 'refreshed' || !refreshDelta) return out
+    for (const r of refreshDelta.ticker_rank) {
+      out[String(r.ticker)] = Number(r.open_interest_delta || 0)
+    }
+    return out
+  }, [section.key, refreshDelta])
+
   return (
     <section className="space-y-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
       <div>
@@ -88,13 +97,14 @@ export function SectionPanel({ title, subtitle, section, focusTitle, refreshDelt
         selectedDte={selectedDte}
         selectedStrikeExp={selectedStrikeExp}
         selectedContract={selectedContract}
+        contractRows={baseRows}
       />
       {section.key === 'refreshed' && refreshDelta ? (
         <ContractChangesTable title="本次刷新合约明细（含新增/持续/扩大/消失）" rows={filteredRows} useDeltaRows selectedContract={selectedContract} onSelectContract={setSelectedContract} />
       ) : (
         <ContractChangesTable title={`${title} 合约明细`} rows={filteredRows} selectedContract={selectedContract} onSelectContract={setSelectedContract} />
       )}
-      <FocusTickerBlocks blocks={section.focus_blocks} title={focusTitle} variant={section.key} />
+      <FocusTickerBlocks blocks={section.focus_blocks} title={focusTitle} variant={section.key} oiDeltaByTicker={focusOiDeltaByTicker} />
     </section>
   )
 }
