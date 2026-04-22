@@ -40,7 +40,7 @@ export function SectionPanel({ title, subtitle, section, focusTitle, refreshDelt
       ) : (
         <ContractChangesTable title={`${title} 合约明细`} rows={section.contracts} />
       )}
-      <FocusTickerBlocks blocks={section.focus_blocks} title={focusTitle} />
+      <FocusTickerBlocks blocks={section.focus_blocks} title={focusTitle} variant={section.key} />
     </section>
   )
 }
