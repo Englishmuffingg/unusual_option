@@ -8,6 +8,7 @@ from typing import Any
 
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response
 
@@ -236,12 +237,13 @@ def dashboard(
             "overall": overall_section,
         },
     }
+    json_payload = jsonable_encoder(payload)
     if pretty == 1:
         return Response(
-            content=json.dumps(payload, ensure_ascii=False, indent=2),
+            content=json.dumps(json_payload, ensure_ascii=False, indent=2),
             media_type="application/json; charset=utf-8",
         )
-    return payload
+    return json_payload
 
 
 def _build_parser() -> argparse.ArgumentParser:
