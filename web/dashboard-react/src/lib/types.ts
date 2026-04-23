@@ -50,8 +50,32 @@ export type DashboardResponse = {
   table: 'stock' | 'etf'
   db_path: string
   comparison_mode?: string
+  metadata?: {
+    comparison_mode: string
+    latest_snapshot_time: string | null
+    previous_snapshot_time: string | null
+    data_source: 'stock' | 'etf'
+    active_filter_summary?: Record<string, unknown>
+  }
+  summary?: {
+    current_total: number
+    new_count: number
+    continued_count: number
+    inactive_count: number
+    put_ratio: number
+    call_ratio: number
+    dominant_ticker: string
+    dominant_dte_bucket: string
+    dominant_strike_bucket: string
+  }
   cards: Record<string, number | string>
   metric_explanations: string[]
+  change_feed?: Array<Record<string, string | number | null>>
+  current_snapshot_rows?: Array<Record<string, string | number | null>>
+  continued_rows?: Array<Record<string, string | number | null>>
+  inactive_rows?: Array<Record<string, string | number | null>>
+  daily_summary?: Array<Record<string, string | number | null>>
+  three_day_summary?: Array<Record<string, string | number | null>>
   refresh_delta: {
     snapshot_time: string | null
     previous_snapshot_time: string | null

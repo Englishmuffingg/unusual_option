@@ -82,6 +82,41 @@ type InactiveRow = {
   previousOpenInterest: number
 }
 
+type ChangeEventRow = {
+  id: string
+  eventTime: string
+  eventType: 'NEW' | 'UPDATE' | 'INACTIVE'
+  ticker: string
+  contractSignature: string
+  contractSymbol: string
+  contractDisplayName: string
+  optionType: 'Call' | 'Put'
+  expirationDate: string
+  strike: number
+  dte: number
+  previousOptionsVolume: number | null
+  currentOptionsVolume: number | null
+  deltaVolume: number | null
+  previousOpenInterest: number | null
+  currentOpenInterest: number | null
+  deltaOpenInterest: number | null
+  estimatedPremium: number | null
+}
+
+type SummaryTickerRow = {
+  ticker: string
+  totalNewCount: number
+  totalUpdateCount: number
+  totalInactiveCount: number
+  cumulativeDeltaVolume: number
+  cumulativeDeltaOpenInterest: number
+  cumulativeEstimatedPremium: number
+  eventCount: number
+  lastEventTime: string
+}
+
+type TableMode = 'current' | 'events' | 'daily_summary'
+
 type StrikeBucket = { label: string; min: number; max: number; volume: number }
 
 const CARD_CLASS = 'rounded-2xl border border-slate-200 bg-white p-4 shadow-sm'
@@ -142,6 +177,45 @@ function normalizeInactiveRow(raw: RawInactiveContract, idx: number): InactiveRo
     strike: toNumber(raw.strike),
     previousOptionsVolume: toNumber(raw.previous_options_volume),
     previousOpenInterest: toNumber(raw.previous_open_interest),
+  }
+}
+
+function normalizeChangeEventRow(raw: Record<string, unknown>, idx: number): ChangeEventRow {
+  const optionType = String(raw.option_type ?? '').toLowerCase().startsWith('p') ? 'Put' : 'Call'
+  const eventType = String(raw.event_type ?? 'UPDATE').toUpperCase() as ChangeEventRow['eventType']
+  return {
+    id: String(raw.contract_signature ?? raw.contract_symbol ?? `event-${idx}`) + `-${idx}`,
+    eventTime: raw.event_time ? String(raw.event_time) : '-',
+    eventType,
+    ticker: String(raw.ticker ?? '-').toUpperCase(),
+    contractSignature: String(raw.contract_signature ?? '-'),
+    contractSymbol: String(raw.contract_symbol ?? '-'),
+    contractDisplayName: String(raw.contract_display_name ?? raw.contract_symbol ?? '-'),
+    optionType,
+    expirationDate: raw.expiration_date ? String(raw.expiration_date) : '-',
+    strike: toNumber(raw.strike),
+    dte: toNumber(raw.dte),
+    previousOptionsVolume: raw.previous_options_volume == null ? null : toNumber(raw.previous_options_volume),
+    currentOptionsVolume: raw.current_options_volume == null ? null : toNumber(raw.current_options_volume),
+    deltaVolume: raw.delta_volume == null ? null : toNumber(raw.delta_volume),
+    previousOpenInterest: raw.previous_open_interest == null ? null : toNumber(raw.previous_open_interest),
+    currentOpenInterest: raw.current_open_interest == null ? null : toNumber(raw.current_open_interest),
+    deltaOpenInterest: raw.delta_open_interest == null ? null : toNumber(raw.delta_open_interest),
+    estimatedPremium: raw.estimated_premium == null ? null : toNumber(raw.estimated_premium),
+  }
+}
+
+function normalizeSummaryTickerRow(raw: Record<string, unknown>): SummaryTickerRow {
+  return {
+    ticker: String(raw.ticker ?? '-').toUpperCase(),
+    totalNewCount: toNumber(raw.total_new_count),
+    totalUpdateCount: toNumber(raw.total_update_count),
+    totalInactiveCount: toNumber(raw.total_inactive_count),
+    cumulativeDeltaVolume: toNumber(raw.cumulative_delta_volume),
+    cumulativeDeltaOpenInterest: toNumber(raw.cumulative_delta_open_interest),
+    cumulativeEstimatedPremium: toNumber(raw.cumulative_estimated_premium),
+    eventCount: toNumber(raw.event_count),
+    lastEventTime: raw.last_event_time ? String(raw.last_event_time) : '-',
   }
 }
 
@@ -219,6 +293,8 @@ export default function App() {
   const [selectedContract, setSelectedContract] = useState<string | null>(null)
   const [selectedStrikeRange, setSelectedStrikeRange] = useState<{ min: number; max: number } | null>(null)
   const [selectionSource, setSelectionSource] = useState<string | null>(null)
+  const [tableMode, setTableMode] = useState<TableMode>('current')
+  const [eventTypeFilter, setEventTypeFilter] = useState<'all' | 'NEW' | 'UPDATE' | 'INACTIVE'>('all')
   const [newExpanded, setNewExpanded] = useState(false)
   const [inactiveExpanded, setInactiveExpanded] = useState(false)
   const [newSort, setNewSort] = useState<'volume' | 'vol_oi' | 'time'>('volume')
@@ -284,6 +360,21 @@ export default function App() {
   const inactiveRows = useMemo(() => {
     const raw = (data?.sections?.inactive_helper?.contracts ?? []) as RawInactiveContract[]
     return raw.map(normalizeInactiveRow)
+  }, [data])
+
+  const changeFeedRows = useMemo(() => {
+    const raw = (data?.change_feed ?? []) as Array<Record<string, unknown>>
+    return raw.map(normalizeChangeEventRow)
+  }, [data])
+
+  const dailySummaryRows = useMemo(() => {
+    const raw = (data?.daily_summary ?? []) as Array<Record<string, unknown>>
+    return raw.map(normalizeSummaryTickerRow)
+  }, [data])
+
+  const threeDaySummaryRows = useMemo(() => {
+    const raw = (data?.three_day_summary ?? []) as Array<Record<string, unknown>>
+    return raw.map(normalizeSummaryTickerRow)
   }, [data])
 
   const filteredRows = useMemo(() => {
@@ -367,6 +458,34 @@ export default function App() {
     }
   }, [filteredRows])
 
+  const behaviorSummary = useMemo(() => {
+    const apiSummary = data?.summary
+    if (!apiSummary) {
+      return {
+        currentTotal: summary.totalContracts,
+        newCount: summary.newContracts,
+        continuedCount: summary.continuingContracts,
+        inactiveCount: inactiveRows.length,
+        putRatio: summary.putShare,
+        callRatio: summary.callShare,
+        dominantTicker: selectedTicker ?? '-',
+        dominantDteBucket: dteLabelMap[summary.topDte],
+        dominantStrikeBucket: summary.topStrike ? String(summary.topStrike) : '-',
+      }
+    }
+    return {
+      currentTotal: toNumber(apiSummary.current_total),
+      newCount: toNumber(apiSummary.new_count),
+      continuedCount: toNumber(apiSummary.continued_count),
+      inactiveCount: toNumber(apiSummary.inactive_count),
+      putRatio: toNumber(apiSummary.put_ratio),
+      callRatio: toNumber(apiSummary.call_ratio),
+      dominantTicker: String(apiSummary.dominant_ticker ?? '-'),
+      dominantDteBucket: String(apiSummary.dominant_dte_bucket ?? '-'),
+      dominantStrikeBucket: String(apiSummary.dominant_strike_bucket ?? '-'),
+    }
+  }, [data, inactiveRows.length, selectedTicker, summary])
+
   const newRowsAll = useMemo(() => {
     const sorted = filteredRows.filter((r) => r.isNew)
     if (newSort === 'volume') return sorted.sort((a, b) => b.optionsVolume - a.optionsVolume)
@@ -382,6 +501,24 @@ export default function App() {
         .slice(0, ACTIVITY_TOP_N),
     [filteredRows],
   )
+
+  const currentSnapshotRows = useMemo(
+    () => filteredRows.slice().sort((a, b) => b.optionsVolume - a.optionsVolume).slice(0, ACTIVITY_TOP_N),
+    [filteredRows],
+  )
+
+  const filteredChangeFeed = useMemo(() => {
+    return changeFeedRows.filter((row) => {
+      if (selectedTicker && row.ticker !== selectedTicker) return false
+      if (selectedContract && row.contractSymbol !== selectedContract) return false
+      if (eventTypeFilter !== 'all' && row.eventType !== eventTypeFilter) return false
+      if (optionFilter === 'call' && row.optionType !== 'Call') return false
+      if (optionFilter === 'put' && row.optionType !== 'Put') return false
+      if (dteFilter !== 'all' && dteBucket(row.dte) !== dteFilter) return false
+      if (selectedStrikeRange && (row.strike < selectedStrikeRange.min || row.strike > selectedStrikeRange.max)) return false
+      return true
+    })
+  }, [changeFeedRows, selectedTicker, selectedContract, eventTypeFilter, optionFilter, dteFilter, selectedStrikeRange])
 
   const comparisonText = useMemo(() => {
     const latest = data?.snapshot_meta?.latest_snapshot_time
@@ -453,9 +590,26 @@ export default function App() {
     return copy
   }, [filteredRows, tableSort])
 
+  const filteredDailySummaryRows = useMemo(() => {
+    return dailySummaryRows.filter((row) => !selectedTicker || row.ticker === selectedTicker)
+  }, [dailySummaryRows, selectedTicker])
+
+  const eventTableRows = useMemo(() => filteredChangeFeed.slice(0, 200), [filteredChangeFeed])
+
   const pageSize = 20
-  const totalPages = Math.max(1, Math.ceil(sortedTableRows.length / pageSize))
-  const pagedRows = sortedTableRows.slice((page - 1) * pageSize, page * pageSize)
+  const totalTableRows =
+    tableMode === 'current'
+      ? sortedTableRows.length
+      : tableMode === 'events'
+        ? eventTableRows.length
+        : filteredDailySummaryRows.length
+  const totalPages = Math.max(1, Math.ceil(totalTableRows / pageSize))
+  const pagedRows =
+    tableMode === 'current'
+      ? sortedTableRows.slice((page - 1) * pageSize, page * pageSize)
+      : tableMode === 'events'
+        ? eventTableRows.slice((page - 1) * pageSize, page * pageSize)
+        : filteredDailySummaryRows.slice((page - 1) * pageSize, page * pageSize)
 
   useEffect(() => setPage(1), [filteredRows.length])
 
@@ -469,6 +623,8 @@ export default function App() {
     setSelectedContract(null)
     setSelectedStrikeRange(null)
     setSelectionSource(null)
+    setTableMode('current')
+    setEventTypeFilter('all')
     setNewExpanded(false)
     setInactiveExpanded(false)
     setNewSort('volume')
@@ -482,6 +638,14 @@ export default function App() {
     <div className="mx-auto max-w-[1500px] space-y-4 bg-white p-4 text-slate-900">
       <section className={CARD_CLASS}>
         <h1 className="text-2xl font-bold">异常期权成交监控（异常行为阅读器）</h1>
+        <div className="mt-2 flex flex-wrap gap-2 text-xs">
+          <span className="rounded-full border border-slate-300 bg-slate-50 px-3 py-1">
+            comparison mode: {data?.comparison_mode ?? 'effective_change_previous'}
+          </span>
+          <span className="rounded-full border border-slate-300 bg-slate-50 px-3 py-1">
+            auto refresh: {Math.round(DASHBOARD_POLL_MS / 1000)}s
+          </span>
+        </div>
         <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-6">
           <div className="lg:col-span-1">
             <div className="mb-1 text-sm text-slate-500">数据源</div>
@@ -554,12 +718,17 @@ export default function App() {
             <h2 className="mb-3 text-lg font-semibold">全局概览</h2>
             <p className="mb-3 text-xs text-slate-500">{comparisonText}</p>
             <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
-              <MetricCard label="新增合约数" value={summary.newContracts} />
-              <MetricCard label="延续合约数" value={summary.continuingContracts} />
-              <MetricCard label="可见合约总数" value={summary.totalContracts} />
-              <MetricCard label="Put 占比" value={`${(summary.putShare * 100).toFixed(1)}%`} />
-              <MetricCard label="Call 占比" value={`${(summary.callShare * 100).toFixed(1)}%`} />
-              <MetricCard label="当前总成交量" value={formatCompact(summary.totalVolume)} />
+              <MetricCard label="当前异常合约总数" value={behaviorSummary.currentTotal} />
+              <MetricCard label="本轮新增数" value={behaviorSummary.newCount} />
+              <MetricCard label="本轮延续数" value={behaviorSummary.continuedCount} />
+              <MetricCard label="本轮不再异常数" value={behaviorSummary.inactiveCount} />
+              <MetricCard label="Put 占比" value={`${(behaviorSummary.putRatio * 100).toFixed(1)}%`} />
+              <MetricCard label="Call 占比" value={`${(behaviorSummary.callRatio * 100).toFixed(1)}%`} />
+            </div>
+            <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-3">
+              <Fact label="当前主导 ticker" value={behaviorSummary.dominantTicker} />
+              <Fact label="当前主导 DTE 区间" value={behaviorSummary.dominantDteBucket} />
+              <Fact label="当前最活跃 strike 区间" value={behaviorSummary.dominantStrikeBucket} />
             </div>
           </section>
 
@@ -599,6 +768,53 @@ export default function App() {
                 <Fact label="最集中的 DTE" value={dteLabelMap[summary.topDte]} />
               </div>
             )}
+          </section>
+
+          <section className={CARD_CLASS}>
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h2 className="text-lg font-semibold">最近变化流</h2>
+                <p className="mt-1 text-xs text-slate-500">按时间倒序查看 NEW / UPDATE / INACTIVE 事件，点击后会联动下方明细表。</p>
+              </div>
+              <div className="flex items-center gap-2 text-xs text-slate-500">
+                <label>
+                  事件类型：
+                  <select value={eventTypeFilter} onChange={(e) => setEventTypeFilter(e.target.value as 'all' | 'NEW' | 'UPDATE' | 'INACTIVE')} className="ml-1 rounded border border-slate-300 px-2 py-1 text-xs text-slate-700">
+                    <option value="all">全部</option>
+                    <option value="NEW">NEW</option>
+                    <option value="UPDATE">UPDATE</option>
+                    <option value="INACTIVE">INACTIVE</option>
+                  </select>
+                </label>
+              </div>
+            </div>
+            <ChangeFeedPanel
+              rows={filteredChangeFeed.slice(0, 12)}
+              onSelect={(row) => {
+                setSelectedTicker(row.ticker || null)
+                setSelectedContract(row.contractSymbol || null)
+                setSelectionSource('最近变化流')
+                setTableMode('events')
+              }}
+            />
+          </section>
+
+          <section className={CARD_CLASS}>
+            <div className="mb-3 flex items-center justify-between">
+              <div>
+                <h2 className="text-lg font-semibold">当前异常快照</h2>
+                <p className="mt-1 text-xs text-slate-500">当前仍在盘面上的 active contracts，帮助快速理解“现在还有什么异常”。</p>
+              </div>
+            </div>
+            <CurrentSnapshotPanel
+              rows={currentSnapshotRows}
+              onSelect={(contract) => {
+                setSelectedContract(contract)
+                setSelectionSource(contract ? '当前异常快照' : null)
+                setTableMode('current')
+              }}
+              selected={selectedContract}
+            />
           </section>
 
           <section className={CARD_CLASS}>
@@ -722,6 +938,34 @@ export default function App() {
           </section>
 
           <section className={CARD_CLASS}>
+            <h2 className="mb-3 text-lg font-semibold">日内 Summary</h2>
+            <p className="mb-3 text-xs text-slate-500">帮助判断今天的情绪主线，聚合最近变化流中的日内 NEW / UPDATE / INACTIVE 事件。</p>
+            <SummaryTickerPanel
+              rows={dailySummaryRows.slice(0, 8)}
+              emptyText="今日暂无变化事件汇总。"
+              onSelectTicker={(ticker) => {
+                setSelectedTicker(ticker)
+                setSelectionSource('日内 Summary')
+                setTableMode('daily_summary')
+              }}
+            />
+          </section>
+
+          <section className={CARD_CLASS}>
+            <h2 className="mb-3 text-lg font-semibold">近三日 Summary</h2>
+            <p className="mb-3 text-xs text-slate-500">用于区分一次性脉冲和持续主题，观察近三日反复出现的 ticker 与持续变化主线。</p>
+            <SummaryTickerPanel
+              rows={threeDaySummaryRows.slice(0, 8)}
+              emptyText="近三日暂无变化事件汇总。"
+              onSelectTicker={(ticker) => {
+                setSelectedTicker(ticker)
+                setSelectionSource('近三日 Summary')
+                setTableMode('daily_summary')
+              }}
+            />
+          </section>
+
+          <section className={CARD_CLASS}>
             <h2 className="mb-3 text-lg font-semibold">延续活动</h2>
             <p className="mb-3 text-xs text-slate-500">相对于最近一次有效变化快照仍在持续异常出现，并展示 Vol / OI 的前后变化。</p>
             <ContinuingActivityPanel
@@ -756,9 +1000,14 @@ export default function App() {
             <div className="mb-3 flex items-center justify-between">
               <h2 className="text-lg font-semibold">明细验证表格</h2>
               <div className="text-right text-sm text-slate-500">
-                <div>共 {sortedTableRows.length} 条</div>
+                <div>共 {totalTableRows} 条</div>
                 {selectionSource ? <div>来源：{selectionSource}</div> : null}
               </div>
+            </div>
+            <div className="mb-3 flex flex-wrap gap-2">
+              <button onClick={() => setTableMode('current')} className={`rounded-lg border px-3 py-1 text-sm ${tableMode === 'current' ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-300'}`}>当前快照</button>
+              <button onClick={() => setTableMode('events')} className={`rounded-lg border px-3 py-1 text-sm ${tableMode === 'events' ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-300'}`}>最近变化</button>
+              <button onClick={() => setTableMode('daily_summary')} className={`rounded-lg border px-3 py-1 text-sm ${tableMode === 'daily_summary' ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-300'}`}>日内汇总</button>
             </div>
             <div className="mb-3 flex flex-wrap gap-2">
               <span className="rounded-full border border-slate-300 bg-slate-50 px-3 py-1 text-xs">{source.toUpperCase()}</span>
@@ -768,57 +1017,18 @@ export default function App() {
                 </span>
               ))}
             </div>
-            {sortedTableRows.length === 0 ? (
+            {totalTableRows === 0 ? (
               <div className="text-sm text-slate-500">当前筛选下没有匹配数据。</div>
             ) : (
               <>
                 <div className="max-h-[520px] overflow-auto rounded-xl border border-slate-200">
-                  <table className="min-w-full text-xs">
-                    <thead className="sticky top-0 bg-slate-100">
-                      <tr>
-                        {[
-                          ['recordedAt', 'recorded_at'],
-                          ['ticker', 'ticker'],
-                          ['contractDisplayName', 'contract_display_name'],
-                          ['optionType', 'option_type'],
-                          ['expirationDate', 'expiration_date'],
-                          ['strike', 'strike'],
-                          ['dte', 'dte'],
-                          ['optionsVolume', 'options_volume'],
-                          ['openInterest', 'open_interest'],
-                          ['volOi', 'Vol/OI'],
-                          ['bidPrice', 'bid_price'],
-                          ['askPrice', 'ask_price'],
-                          ['midPrice', 'mid_price'],
-                          ['isNew', 'is_new'],
-                          ['isRefreshed', 'is_refreshed'],
-                        ].map(([key, label]) => (
-                          <th key={key} onClick={() => onSortHeader(key as keyof ContractRow)} className="cursor-pointer border-b border-slate-200 px-2 py-2 text-left font-semibold">{label}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {pagedRows.map((r) => (
-                        <tr key={r.id} className={`border-b border-slate-100 hover:bg-sky-50 ${selectedContract === r.contractSymbol ? 'bg-amber-50' : ''}`}>
-                          <td className="px-2 py-1">{r.recordedAt}</td>
-                          <td className="px-2 py-1">{r.ticker}</td>
-                          <td className="px-2 py-1">{r.contractDisplayName}</td>
-                          <td className={`px-2 py-1 ${r.optionType === 'Put' ? 'text-rose-600' : 'text-emerald-600'}`}>{r.optionType}</td>
-                          <td className="px-2 py-1">{r.expirationDate}</td>
-                          <td className="px-2 py-1">{r.strike}</td>
-                          <td className="px-2 py-1">{r.dte}</td>
-                          <td className="px-2 py-1">{formatCompact(r.optionsVolume)}</td>
-                          <td className="px-2 py-1">{formatCompact(r.openInterest)}</td>
-                          <td className="px-2 py-1">{r.volOi.toFixed(2)}</td>
-                          <td className="px-2 py-1">{r.bidPrice.toFixed(2)}</td>
-                          <td className="px-2 py-1">{r.askPrice.toFixed(2)}</td>
-                          <td className="px-2 py-1">{r.midPrice.toFixed(2)}</td>
-                          <td className="px-2 py-1">{r.isNew ? '是' : '否'}</td>
-                          <td className="px-2 py-1">{r.isRefreshed ? '是' : '否'}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                  {tableMode === 'current' ? (
+                    <CurrentTable rows={pagedRows as ContractRow[]} onSortHeader={onSortHeader} selectedContract={selectedContract} />
+                  ) : tableMode === 'events' ? (
+                    <EventTable rows={pagedRows as ChangeEventRow[]} selectedContract={selectedContract} />
+                  ) : (
+                    <DailySummaryTable rows={pagedRows as SummaryTickerRow[]} />
+                  )}
                 </div>
                 <div className="mt-3 flex items-center justify-end gap-2 text-sm">
                   <button disabled={page <= 1} className="rounded border border-slate-300 px-2 py-1 disabled:opacity-50" onClick={() => setPage((p) => Math.max(1, p - 1))}>上一页</button>
@@ -831,6 +1041,205 @@ export default function App() {
         </>
       )}
     </div>
+  )
+}
+
+function ChangeFeedPanel({ rows, onSelect }: { rows: ChangeEventRow[]; onSelect: (row: ChangeEventRow) => void }) {
+  if (rows.length === 0) return <div className="text-sm text-slate-500">最近没有可展示的变化事件。</div>
+  return (
+    <div className="space-y-2">
+      {rows.map((row) => {
+        const badgeCls =
+          row.eventType === 'NEW'
+            ? 'bg-rose-100 text-rose-700'
+            : row.eventType === 'UPDATE'
+              ? 'bg-amber-100 text-amber-700'
+              : 'bg-slate-200 text-slate-700'
+        return (
+          <button key={row.id} onClick={() => onSelect(row)} className="block w-full rounded-xl border border-slate-200 p-3 text-left hover:bg-slate-50">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${badgeCls}`}>{row.eventType}</span>
+                <span className="font-semibold">{row.contractDisplayName}</span>
+                <span className="text-xs text-slate-500">{row.ticker}</span>
+              </div>
+              <span className="text-xs text-slate-500">{formatShortTime(row.eventTime)}</span>
+            </div>
+            <div className="mt-2 flex flex-wrap gap-3 text-xs text-slate-500">
+              <span>{row.optionType}</span>
+              <span>Exp {formatShortDate(row.expirationDate)}</span>
+              <span>Strike {row.strike}</span>
+              {row.currentOptionsVolume != null ? <span>当前 Vol {formatCompact(row.currentOptionsVolume)}</span> : null}
+              {row.deltaVolume != null ? <span>ΔVol {row.deltaVolume >= 0 ? '+' : '-'}{formatCompact(Math.abs(row.deltaVolume))}</span> : null}
+              {row.deltaOpenInterest != null ? <span>ΔOI {row.deltaOpenInterest >= 0 ? '+' : '-'}{formatCompact(Math.abs(row.deltaOpenInterest))}</span> : null}
+            </div>
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+function CurrentSnapshotPanel({ rows, onSelect, selected }: { rows: ContractRow[]; onSelect: (contract: string | null) => void; selected: string | null }) {
+  if (rows.length === 0) return <div className="text-sm text-slate-500">当前没有 active contracts。</div>
+  return (
+    <div className="space-y-2">
+      {rows.map((r) => (
+        <button
+          key={r.id}
+          onClick={() => onSelect(selected === r.contractSymbol ? null : r.contractSymbol)}
+          className={`block w-full rounded-xl border p-3 text-left ${selected === r.contractSymbol ? 'border-slate-900 bg-slate-50' : 'border-slate-200'}`}
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${r.isNew ? 'bg-rose-100 text-rose-700' : 'bg-amber-100 text-amber-700'}`}>
+                {r.isNew ? 'NEW' : 'CONTINUED'}
+              </span>
+              <span className="font-semibold">{r.contractDisplayName}</span>
+              <span className="text-xs text-slate-500">{r.ticker}</span>
+            </div>
+            <span className="text-sm font-semibold text-slate-700">{formatCompact(r.optionsVolume)}</span>
+          </div>
+          <div className="mt-2 flex flex-wrap gap-3 text-xs text-slate-500">
+            <span>{r.optionType}</span>
+            <span>Exp {formatShortDate(r.expirationDate)}</span>
+            <span>Strike {r.strike}</span>
+            <span>OI {formatCompact(r.openInterest)}</span>
+            <span>Vol/OI {r.volOi.toFixed(2)}</span>
+          </div>
+        </button>
+      ))}
+    </div>
+  )
+}
+
+function SummaryTickerPanel({ rows, emptyText, onSelectTicker }: { rows: SummaryTickerRow[]; emptyText: string; onSelectTicker: (ticker: string) => void }) {
+  if (rows.length === 0) return <div className="text-sm text-slate-500">{emptyText}</div>
+  return (
+    <div className="space-y-2">
+      {rows.map((row) => (
+        <button key={row.ticker} onClick={() => onSelectTicker(row.ticker)} className="flex w-full items-center justify-between rounded-xl border border-slate-200 px-3 py-3 text-left hover:bg-slate-50">
+          <div>
+            <div className="font-semibold">{row.ticker}</div>
+            <div className="mt-1 flex flex-wrap gap-3 text-xs text-slate-500">
+              <span>NEW {row.totalNewCount}</span>
+              <span>UPDATE {row.totalUpdateCount}</span>
+              <span>INACTIVE {row.totalInactiveCount}</span>
+            </div>
+          </div>
+          <div className="text-right text-xs text-slate-500">
+            <div>ΔVol {row.cumulativeDeltaVolume >= 0 ? '+' : '-'}{formatCompact(Math.abs(row.cumulativeDeltaVolume))}</div>
+            <div>ΔOI {row.cumulativeDeltaOpenInterest >= 0 ? '+' : '-'}{formatCompact(Math.abs(row.cumulativeDeltaOpenInterest))}</div>
+          </div>
+        </button>
+      ))}
+    </div>
+  )
+}
+
+function CurrentTable({ rows, onSortHeader, selectedContract }: { rows: ContractRow[]; onSortHeader: (key: keyof ContractRow) => void; selectedContract: string | null }) {
+  return (
+    <table className="min-w-full text-xs">
+      <thead className="sticky top-0 bg-slate-100">
+        <tr>
+          {[
+            ['recordedAt', 'last_update_time'],
+            ['ticker', 'ticker'],
+            ['contractDisplayName', 'contract_display_name'],
+            ['optionType', 'option_type'],
+            ['expirationDate', 'expiration_date'],
+            ['strike', 'strike'],
+            ['dte', 'dte'],
+            ['optionsVolume', 'current_options_volume'],
+            ['openInterest', 'current_open_interest'],
+            ['volOi', 'vol_oi_ratio'],
+            ['isNew', 'new'],
+            ['isRefreshed', 'continued'],
+          ].map(([key, label]) => (
+            <th key={key} onClick={() => onSortHeader(key as keyof ContractRow)} className="cursor-pointer border-b border-slate-200 px-2 py-2 text-left font-semibold">{label}</th>
+          ))}
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((r) => (
+          <tr key={r.id} className={`border-b border-slate-100 hover:bg-sky-50 ${selectedContract === r.contractSymbol ? 'bg-amber-50' : ''}`}>
+            <td className="px-2 py-1">{r.recordedAt}</td>
+            <td className="px-2 py-1">{r.ticker}</td>
+            <td className="px-2 py-1">{r.contractDisplayName}</td>
+            <td className="px-2 py-1">{r.optionType}</td>
+            <td className="px-2 py-1">{r.expirationDate}</td>
+            <td className="px-2 py-1">{r.strike}</td>
+            <td className="px-2 py-1">{r.dte}</td>
+            <td className="px-2 py-1">{formatCompact(r.optionsVolume)}</td>
+            <td className="px-2 py-1">{formatCompact(r.openInterest)}</td>
+            <td className="px-2 py-1">{r.volOi.toFixed(2)}</td>
+            <td className="px-2 py-1">{r.isNew ? '是' : '否'}</td>
+            <td className="px-2 py-1">{r.isRefreshed ? '是' : '否'}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
+}
+
+function EventTable({ rows, selectedContract }: { rows: ChangeEventRow[]; selectedContract: string | null }) {
+  return (
+    <table className="min-w-full text-xs">
+      <thead className="sticky top-0 bg-slate-100">
+        <tr>
+          {['event_time', 'event_type', 'ticker', 'contract_display_name', 'option_type', 'expiration_date', 'strike', 'previous_vol', 'current_vol', 'delta_vol', 'previous_oi', 'current_oi', 'delta_oi'].map((label) => (
+            <th key={label} className="border-b border-slate-200 px-2 py-2 text-left font-semibold">{label}</th>
+          ))}
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((r) => (
+          <tr key={r.id} className={`border-b border-slate-100 ${selectedContract === r.contractSymbol ? 'bg-amber-50' : ''}`}>
+            <td className="px-2 py-1">{r.eventTime}</td>
+            <td className="px-2 py-1">{r.eventType}</td>
+            <td className="px-2 py-1">{r.ticker}</td>
+            <td className="px-2 py-1">{r.contractDisplayName}</td>
+            <td className="px-2 py-1">{r.optionType}</td>
+            <td className="px-2 py-1">{r.expirationDate}</td>
+            <td className="px-2 py-1">{r.strike}</td>
+            <td className="px-2 py-1">{r.previousOptionsVolume == null ? '--' : formatCompact(r.previousOptionsVolume)}</td>
+            <td className="px-2 py-1">{r.currentOptionsVolume == null ? '--' : formatCompact(r.currentOptionsVolume)}</td>
+            <td className="px-2 py-1">{r.deltaVolume == null ? '--' : `${r.deltaVolume >= 0 ? '+' : '-'}${formatCompact(Math.abs(r.deltaVolume))}`}</td>
+            <td className="px-2 py-1">{r.previousOpenInterest == null ? '--' : formatCompact(r.previousOpenInterest)}</td>
+            <td className="px-2 py-1">{r.currentOpenInterest == null ? '--' : formatCompact(r.currentOpenInterest)}</td>
+            <td className="px-2 py-1">{r.deltaOpenInterest == null ? '--' : `${r.deltaOpenInterest >= 0 ? '+' : '-'}${formatCompact(Math.abs(r.deltaOpenInterest))}`}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
+}
+
+function DailySummaryTable({ rows }: { rows: SummaryTickerRow[] }) {
+  return (
+    <table className="min-w-full text-xs">
+      <thead className="sticky top-0 bg-slate-100">
+        <tr>
+          {['ticker', 'total_new_count', 'total_update_count', 'total_inactive_count', 'cumulative_delta_volume', 'cumulative_delta_open_interest', 'event_count', 'last_event_time'].map((label) => (
+            <th key={label} className="border-b border-slate-200 px-2 py-2 text-left font-semibold">{label}</th>
+          ))}
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((r) => (
+          <tr key={`${r.ticker}-${r.lastEventTime}`} className="border-b border-slate-100">
+            <td className="px-2 py-1">{r.ticker}</td>
+            <td className="px-2 py-1">{r.totalNewCount}</td>
+            <td className="px-2 py-1">{r.totalUpdateCount}</td>
+            <td className="px-2 py-1">{r.totalInactiveCount}</td>
+            <td className="px-2 py-1">{r.cumulativeDeltaVolume >= 0 ? '+' : '-'}{formatCompact(Math.abs(r.cumulativeDeltaVolume))}</td>
+            <td className="px-2 py-1">{r.cumulativeDeltaOpenInterest >= 0 ? '+' : '-'}{formatCompact(Math.abs(r.cumulativeDeltaOpenInterest))}</td>
+            <td className="px-2 py-1">{r.eventCount}</td>
+            <td className="px-2 py-1">{r.lastEventTime}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
   )
 }
 
