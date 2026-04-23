@@ -15,7 +15,7 @@ export type SummaryRow = {
 }
 
 export type SectionPayload = {
-  key: 'refreshed' | 'today_new' | 'overall'
+  key: 'refreshed' | 'today_new' | 'overall' | 'inactive_helper'
   summary: SummaryRow[]
   bubble: Array<{
     ticker: string
@@ -49,16 +49,19 @@ export type FocusBlock = {
 export type DashboardResponse = {
   table: 'stock' | 'etf'
   db_path: string
+  comparison_mode?: string
   cards: Record<string, number | string>
   metric_explanations: string[]
   refresh_delta: {
     snapshot_time: string | null
     previous_snapshot_time: string | null
+    comparison_mode?: string | null
     contract_count_delta: number
     options_volume_delta: number
     estimated_premium_delta: number
     open_interest_delta: number
     new_contract_count: number
+    inactive_contract_count?: number
     disappeared_contract_count: number
     persistent_contract_count: number
     ticker_rank: Array<{ ticker: string; premium_delta: number; volume_delta: number; open_interest_delta: number; contract_count_delta: number }>
@@ -68,5 +71,11 @@ export type DashboardResponse = {
     refreshed: SectionPayload
     today_new: SectionPayload
     overall: SectionPayload
+    inactive_helper: SectionPayload
+  }
+  snapshot_meta?: {
+    latest_snapshot_time: string | null
+    previous_snapshot_time: string | null
+    comparison_mode?: string | null
   }
 }

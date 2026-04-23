@@ -1,11 +1,13 @@
-import { FocusBlock } from '@/lib/types'
+﻿import { FocusBlock } from '@/lib/types'
 
-type Props = { blocks: FocusBlock[]; title: string; variant?: 'refreshed' | 'today_new' | 'overall'; oiDeltaByTicker?: Record<string, number> }
+type Variant = 'refreshed' | 'today_new' | 'overall' | 'inactive_helper'
+type Props = { blocks: FocusBlock[]; title: string; variant?: Variant; oiDeltaByTicker?: Record<string, number> }
 
-function blockHint(variant: 'refreshed' | 'today_new' | 'overall') {
-  if (variant === 'refreshed') return '语义：刚刚这一轮“新进入结果集”的变化'
-  if (variant === 'today_new') return '语义：今天累计“新进入异常池”的扩散'
-  return '语义：当前异常池整体结构与持续活跃层'
+function blockHint(variant: Variant) {
+  if (variant === 'refreshed') return '璇箟锛氬垰鍒氳繖涓€杞€滄柊杩涘叆缁撴灉闆嗏€濈殑鍙樺寲'
+  if (variant === 'today_new') return '语义：相对于最近一次有效变化快照新增'
+  if (variant === 'inactive_helper') return '语义：相对于最近一次有效变化快照未继续被异常捕捉'
+  return '璇箟锛氬綋鍓嶅紓甯告睜鏁翠綋缁撴瀯涓庢寔缁椿璺冨眰'
 }
 
 export function FocusTickerBlocks({ blocks, title, variant = 'overall', oiDeltaByTicker = {} }: Props) {
@@ -23,20 +25,20 @@ export function FocusTickerBlocks({ blocks, title, variant = 'overall', oiDeltaB
               <span className="rounded bg-amber-100 px-2 py-0.5 text-xs text-amber-800">{b.flow_desc}</span>
             </div>
             <div className="grid grid-cols-2 gap-2 text-xs">
-              <div>Call占比: {(b.call_premium_pct * 100).toFixed(1)}%</div>
-              <div>Put占比: {(b.put_premium_pct * 100).toFixed(1)}%</div>
-              <div>{variant === 'refreshed' ? '本轮刷新新增' : '本次刷新新增'}: {b.refreshed_rows}</div>
-              <div>{variant === 'today_new' ? '今日累计新增' : '今日新增'}: {b.new_rows}</div>
-              {variant === 'refreshed' && <div>本轮 OI 变化: {Number(oiDeltaByTicker[b.ticker] || 0).toLocaleString('zh-CN')}</div>}
+              <div>Call鍗犳瘮: {(b.call_premium_pct * 100).toFixed(1)}%</div>
+              <div>Put鍗犳瘮: {(b.put_premium_pct * 100).toFixed(1)}%</div>
+              <div>{variant === 'refreshed' ? '鏈疆鍒锋柊鏂板' : '鏈鍒锋柊鏂板'}: {b.refreshed_rows}</div>
+              <div>{variant === 'today_new' ? '浠婃棩绱鏂板' : '浠婃棩鏂板'}: {b.new_rows}</div>
+              {variant === 'refreshed' && <div>鏈疆 OI 鍙樺寲: {Number(oiDeltaByTicker[b.ticker] || 0).toLocaleString('zh-CN')}</div>}
               <div>median_dte: {b.median_dte}</div>
               <div>avg/max ratio: {b.avg_ratio} / {b.max_ratio}</div>
             </div>
             <div className="mt-2 text-xs text-slate-700">
-              主要strike：
+              涓昏strike锛?
               {b.top_strikes.slice(0, 3).map((s) => `${s.option_type} ${s.strike}`).join(' / ') || '-'}
             </div>
             <div className="mt-2 text-xs text-slate-500">
-              重点到期：{String(b.top_contracts[0]?.expiration_date || '-')} ｜ 顶部合约：{String(b.top_contracts[0]?.contract_display_name || '-')}
+              重点到期：{String(b.top_contracts[0]?.expiration_date || '-')} · 顶部合约：{String(b.top_contracts[0]?.contract_display_name || '-')}
             </div>
           </div>
         ))}
@@ -44,3 +46,4 @@ export function FocusTickerBlocks({ blocks, title, variant = 'overall', oiDeltaB
     </div>
   )
 }
+

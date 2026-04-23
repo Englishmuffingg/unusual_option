@@ -1,6 +1,7 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -24,7 +25,7 @@ try:
         summarize_by_ticker,
     )
 except ModuleNotFoundError:
-    # 兼容从非项目根目录直接运行脚本（例如：cd stock 后 python dashboard_api.py）
+    # 鍏煎浠庨潪椤圭洰鏍圭洰褰曠洿鎺ヨ繍琛岃剼鏈紙渚嬪锛歝d stock 鍚?python dashboard_api.py锛?
     project_root = Path(__file__).resolve().parent.parent
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
@@ -59,10 +60,10 @@ def _to_float(v: Any, nd: int = 2) -> float:
 
 def _flow_desc(call_pct: float, put_pct: float) -> str:
     if call_pct >= 0.65:
-        return "偏多"
+        return "call-heavy"
     if put_pct >= 0.65:
-        return "偏防守"
-    return "双向博弈"
+        return "put-heavy"
+    return "mixed"
 
 
 def _build_summary(df: pd.DataFrame) -> pd.DataFrame:
@@ -116,7 +117,7 @@ def _focus_blocks(df: pd.DataFrame, summary: pd.DataFrame, dataset_name: str) ->
         out.append(
             {
                 "ticker": ticker,
-                "flow_desc": r.get("flow_desc", "双向博弈"),
+                "flow_desc": r.get("flow_desc", "鍙屽悜鍗氬紙"),
                 "call_premium_pct": _to_float(r.get("call_premium_pct", 0), 4),
                 "put_premium_pct": _to_float(r.get("put_premium_pct", 0), 4),
                 "median_dte": _to_float(r.get("median_dte", 0)),
@@ -253,6 +254,63 @@ def _aggregate_snapshot_contracts(df: pd.DataFrame) -> pd.DataFrame:
     return work.groupby(["contract_signature"], dropna=False).agg(agg_map).reset_index()
 
 
+def _build_snapshot_fingerprint(snapshot_df: pd.DataFrame) -> str:
+    agg = _aggregate_snapshot_contracts(snapshot_df)
+    if agg.empty:
+        return "empty"
+
+    fingerprint_cols = ["contract_signature", "options_volume", "open_interest"]
+    if "estimated_premium" in agg.columns:
+        fingerprint_cols.append("estimated_premium")
+
+    stable = agg[fingerprint_cols].copy()
+    stable["contract_signature"] = stable["contract_signature"].fillna("").astype(str)
+    for col in fingerprint_cols[1:]:
+        stable[col] = pd.to_numeric(stable[col], errors="coerce").fillna(0).round(6)
+    stable = stable.sort_values("contract_signature").reset_index(drop=True)
+    payload = stable.to_json(orient="records", date_format="iso", double_precision=6)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _snapshot_batches(raw_df: pd.DataFrame) -> list[tuple[pd.DataFrame, Any]]:
+    if raw_df.empty:
+        return []
+
+    work = _ensure_contract_signature(raw_df)
+    ts_col = "snapshot_at" if "snapshot_at" in work.columns else "recorded_at"
+    if ts_col not in work.columns:
+        return []
+
+    work[ts_col] = pd.to_datetime(work[ts_col], errors="coerce")
+    work = work[work[ts_col].notna()].copy()
+    if work.empty:
+        return []
+
+    batches: list[tuple[pd.DataFrame, Any]] = []
+    has_refresh = "refresh_id" in work.columns and work["refresh_id"].fillna("").astype(str).str.strip().ne("").any()
+
+    if has_refresh:
+        ref = (
+            work[["refresh_id", ts_col]]
+            .dropna()
+            .assign(refresh_id=lambda df: df["refresh_id"].astype(str))
+            .sort_values(ts_col)
+            .drop_duplicates(subset=["refresh_id"], keep="last")
+            .sort_values(ts_col, ascending=False)
+        )
+        for _, row in ref.iterrows():
+            refresh_id = row["refresh_id"]
+            snapshot_time = row[ts_col]
+            frame = work[work["refresh_id"].astype(str) == refresh_id].copy()
+            batches.append((frame, snapshot_time))
+        return batches
+
+    for snapshot_time in sorted(work[ts_col].dropna().unique(), reverse=True):
+        frame = work[work[ts_col] == snapshot_time].copy()
+        batches.append((frame, snapshot_time))
+    return batches
+
+
 def _build_contract_comparison(latest_df: pd.DataFrame, previous_df: pd.DataFrame) -> pd.DataFrame:
     cur = _aggregate_snapshot_contracts(latest_df)
     prev = _aggregate_snapshot_contracts(previous_df)
@@ -287,60 +345,70 @@ def _build_contract_comparison(latest_df: pd.DataFrame, previous_df: pd.DataFram
     merged["delta_open_interest"] = merged["open_interest_cur"] - merged["open_interest_prev"]
     merged["status"] = "continued"
     merged.loc[merged["in_latest"] & ~merged["in_previous"], "status"] = "new"
-    merged.loc[~merged["in_latest"] & merged["in_previous"], "status"] = "disappeared"
+    merged.loc[~merged["in_latest"] & merged["in_previous"], "status"] = "inactive"
     return merged
 
 
-def _latest_previous_frames(raw_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, Any, Any]:
-    if raw_df.empty:
-        return raw_df.iloc[0:0].copy(), raw_df.iloc[0:0].copy(), None, None
-    work = _ensure_contract_signature(raw_df)
-    ts_col = "snapshot_at" if "snapshot_at" in work.columns else "recorded_at"
-    if ts_col not in work.columns:
-        return work.iloc[0:0].copy(), work.iloc[0:0].copy(), None, None
-    work[ts_col] = pd.to_datetime(work[ts_col], errors="coerce")
-    work = work[work[ts_col].notna()].copy()
-    if work.empty:
-        return work.iloc[0:0].copy(), work.iloc[0:0].copy(), None, None
+def _latest_previous_frames_by_effective_change(
+    raw_df: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame, Any, Any, str]:
+    empty = raw_df.iloc[0:0].copy()
+    batches = _snapshot_batches(raw_df)
+    if not batches:
+        return empty, empty, None, None, "effective_change_previous"
 
-    if "refresh_id" in work.columns and work["refresh_id"].fillna("").astype(str).str.strip().ne("").any():
-        ref = (
-            work[["refresh_id", ts_col]]
-            .dropna()
-            .sort_values(ts_col)
-            .drop_duplicates(subset=["refresh_id"], keep="last")
-        )
-        ordered = ref.sort_values(ts_col, ascending=False).reset_index(drop=True)
-        latest_id = ordered.iloc[0]["refresh_id"]
-        latest_ts = ordered.iloc[0][ts_col]
-        latest_df = work[work["refresh_id"] == latest_id].copy()
-        prev_df = work.iloc[0:0].copy()
-        prev_ts = None
-        if len(ordered) >= 2:
-            prev_id = ordered.iloc[1]["refresh_id"]
-            prev_df = work[work["refresh_id"] == prev_id].copy()
-            prev_ts = ordered.iloc[1][ts_col]
-        return latest_df, prev_df, latest_ts, prev_ts
+    latest_df, latest_ts = batches[0]
+    latest_fingerprint = _build_snapshot_fingerprint(latest_df)
+    previous_df = empty
+    previous_ts = None
 
-    snaps = sorted(work[ts_col].dropna().unique())
-    latest = snaps[-1]
-    previous = snaps[-2] if len(snaps) >= 2 else None
-    latest_df = work[work[ts_col] == latest].copy()
-    prev_df = work[work[ts_col] == previous].copy() if previous is not None else work.iloc[0:0].copy()
-    return latest_df, prev_df, latest, previous
+    for candidate_df, candidate_ts in batches[1:]:
+        if _build_snapshot_fingerprint(candidate_df) != latest_fingerprint:
+            previous_df = candidate_df.copy()
+            previous_ts = candidate_ts
+            break
+
+    return latest_df.copy(), previous_df, latest_ts, previous_ts, "effective_change_previous"
+
+
+def _build_inactive_contract_rows(comparison_df: pd.DataFrame) -> list[dict[str, Any]]:
+    if comparison_df.empty:
+        return []
+
+    inactive = comparison_df[comparison_df["status"] == "inactive"].copy()
+    if inactive.empty:
+        return []
+
+    rows = pd.DataFrame(
+        {
+            "contract_signature": inactive["contract_signature"],
+            "ticker": inactive["ticker"].fillna(""),
+            "contract_symbol": inactive["contract_symbol"].fillna(""),
+            "contract_display_name": inactive.get("contract_display_name_prev", ""),
+            "option_type": inactive.get("option_type_prev", ""),
+            "expiration_date": inactive.get("expiration_date_prev", None),
+            "strike": pd.to_numeric(inactive.get("strike_prev", 0), errors="coerce").fillna(0),
+            "previous_options_volume": pd.to_numeric(inactive["options_volume_prev"], errors="coerce").fillna(0),
+            "previous_open_interest": pd.to_numeric(inactive["open_interest_prev"], errors="coerce").fillna(0),
+        }
+    )
+    rows = rows.sort_values(["previous_options_volume", "previous_open_interest"], ascending=[False, False])
+    return rows.where(pd.notna(rows), None).to_dict("records")
 
 
 def _build_refresh_delta(raw_df: pd.DataFrame) -> dict[str, Any]:
-    latest_df, prev_df, latest_ts, previous_ts = _latest_previous_frames(raw_df)
+    latest_df, prev_df, latest_ts, previous_ts, comparison_mode = _latest_previous_frames_by_effective_change(raw_df)
     if latest_df.empty:
         return {
             "snapshot_time": None,
             "previous_snapshot_time": None,
+            "comparison_mode": comparison_mode,
             "contract_count_delta": 0,
             "options_volume_delta": 0,
             "estimated_premium_delta": 0,
             "open_interest_delta": 0,
             "new_contract_count": 0,
+            "inactive_contract_count": 0,
             "disappeared_contract_count": 0,
             "persistent_contract_count": 0,
             "ticker_rank": [],
@@ -394,12 +462,14 @@ def _build_refresh_delta(raw_df: pd.DataFrame) -> dict[str, Any]:
     return {
         "snapshot_time": str(latest_ts) if latest_ts is not None else None,
         "previous_snapshot_time": str(previous_ts) if previous_ts is not None else None,
+        "comparison_mode": comparison_mode,
         "contract_count_delta": int(len(cur) - len(prev)),
         "options_volume_delta": _to_float(cur["options_volume"].sum() - prev["options_volume"].sum(), 0),
         "estimated_premium_delta": _to_float(cur["estimated_premium"].sum() - prev["estimated_premium"].sum(), 2),
         "open_interest_delta": _to_float(cur["open_interest"].sum() - prev["open_interest"].sum(), 0),
         "new_contract_count": int((merged["status"] == "new").sum()),
-        "disappeared_contract_count": int((merged["status"] == "disappeared").sum()),
+        "inactive_contract_count": int((merged["status"] == "inactive").sum()),
+        "disappeared_contract_count": int((merged["status"] == "inactive").sum()),
         "persistent_contract_count": int((merged["status"] == "continued").sum()),
         "ticker_rank": ticker_rank.fillna(0).to_dict("records"),
         "contract_changes": change_rows.where(pd.notna(change_rows), None).to_dict("records"),
@@ -417,8 +487,8 @@ def index() -> str:
     <html>
       <head><meta charset="utf-8"><title>Unusual Options Dashboard API</title></head>
       <body style="font-family: Arial, sans-serif; padding: 20px;">
-        <h2>Unusual Options Dashboard API 已启动</h2>
-        <p>这是 JSON API 服务，接口默认返回紧凑 JSON（单行显示是正常的）。</p>
+        <h2>Unusual Options Dashboard API 宸插惎鍔?/h2>
+        <p>杩欐槸 JSON API 鏈嶅姟锛屾帴鍙ｉ粯璁よ繑鍥炵揣鍑?JSON锛堝崟琛屾樉绀烘槸姝ｅ父鐨勶級銆?/p>
         <ul>
           <li><a href="/api/health">/api/health</a></li>
           <li><a href="/api/dashboard?table=stock&pretty=1">/api/dashboard?table=stock&pretty=1</a></li>
@@ -433,7 +503,7 @@ def index() -> str:
 @app.get("/api/dashboard")
 def dashboard_api(
     table: str = Query("stock", pattern="^(stock|etf)$"),
-    pretty: int = Query(0, ge=0, le=1, description="1=格式化输出 JSON，便于浏览器阅读"),
+    pretty: int = Query(0, ge=0, le=1, description="1=formatted JSON output"),
 ) -> dict[str, Any]:
     try:
         raw = load_table_read_only(DB_PATH, table)
@@ -445,7 +515,7 @@ def dashboard_api(
     except Exception:
         current_raw = pd.DataFrame()
 
-    latest_raw, previous_raw, latest_ts, previous_ts = _latest_previous_frames(raw)
+    latest_raw, previous_raw, latest_ts, previous_ts, comparison_mode = _latest_previous_frames_by_effective_change(raw)
     latest_df = _ensure_contract_signature(normalize_df(latest_raw))
     previous_df = _ensure_contract_signature(normalize_df(previous_raw))
     comparison_df = _build_contract_comparison(latest_raw, previous_raw)
@@ -462,8 +532,10 @@ def dashboard_api(
     prev_keys = set(previous_df["contract_signature"].astype(str).tolist()) if not previous_df.empty else set()
     if latest_keys:
         df = df[df["contract_signature"].isin(latest_keys)].copy()
+
     df["is_new"] = df["contract_signature"].isin(latest_keys - prev_keys).astype(int)
     df["is_refreshed"] = df["contract_signature"].isin(latest_keys & prev_keys).astype(int)
+    df["inactive"] = 0
 
     if not comparison_df.empty:
         previous_fields = comparison_df[
@@ -474,6 +546,7 @@ def dashboard_api(
                 "delta_volume",
                 "delta_open_interest",
                 "in_previous",
+                "status",
             ]
         ].rename(
             columns={
@@ -491,13 +564,31 @@ def dashboard_api(
         )
         previous_fields = previous_fields.drop(columns=["in_previous"])
         df = df.merge(previous_fields, on="contract_signature", how="left")
+        df["status"] = df["status"].fillna("new")
+    else:
+        df["previous_options_volume"] = None
+        df["previous_open_interest"] = None
+        df["delta_volume"] = pd.to_numeric(df["options_volume"], errors="coerce").fillna(0)
+        df["delta_open_interest"] = pd.to_numeric(df["open_interest"], errors="coerce").fillna(0)
+        df["status"] = "new"
 
     refreshed_df = df[df["is_refreshed"] == 1].copy()
     today_new_df = df[df["is_new"] == 1].copy()
+    inactive_rows = _build_inactive_contract_rows(comparison_df)
 
     overall_section = _section_payload(df, "overall", table)
     refreshed_section = _section_payload(refreshed_df, "refreshed", table)
     today_section = _section_payload(today_new_df, "today_new", table)
+    inactive_section = {
+        "key": "inactive_helper",
+        "summary": [],
+        "bubble": [],
+        "dte_profile": [],
+        "strike_profile": [],
+        "focus_blocks": [],
+        "contracts": inactive_rows,
+        "best_ticker": "-",
+    }
 
     overall_summary = _build_summary(df)
     focus_overall = _focus_blocks(df, overall_summary, table)
@@ -514,6 +605,7 @@ def dashboard_api(
         "refreshed_total_premium": _to_float(refreshed_df["estimated_premium"].sum(), 2) if not refreshed_df.empty else 0,
         "today_new_ticker_count": int(today_new_df["ticker"].nunique()) if not today_new_df.empty else 0,
         "today_new_contract_count": int(len(today_new_df)),
+        "inactive_contract_count": int(len(inactive_rows)),
         "overall_ticker_count": int(df["ticker"].nunique()) if not df.empty else 0,
         "overall_median_dte": _to_float(overall_summary["median_dte"].mean(), 2) if not overall_summary.empty else 0,
         "overall_avg_ratio": _to_float(overall_summary["avg_ratio"].mean(), 2) if not overall_summary.empty else 0,
@@ -525,25 +617,28 @@ def dashboard_api(
     payload = {
         "table": table,
         "db_path": str(DB_PATH),
+        "comparison_mode": comparison_mode,
         "cards": cards,
         "metric_explanations": [
-            "Call 权利金占比高 = 更偏多",
-            "Put 权利金占比高 = 更偏防守",
-            "is_new = latest 有、previous 没有（新增）",
-            "is_refreshed = latest 与 previous 都有（延续）",
-            "median_dte = 主流期限结构",
-            "avg_ratio / max_ratio = 异常程度",
-            "bullish_score = Call 权利金占比 - Put 权利金占比",
+            "Call premium share high = more call-heavy flow",
+            "Put premium share high = more defensive or bearish flow",
+            "新增 = 相对于最近一次有效变化快照新增",
+            "延续 = 相对于最近一次有效变化快照继续出现",
+            "不再异常 = 相对于最近一次有效变化快照未继续被异常捕捉",
+            "comparison_mode = effective_change_previous",
+            "avg_ratio / max_ratio = 异常强度参考",
         ],
         "sections": {
             "refreshed": refreshed_section,
             "today_new": today_section,
             "overall": overall_section,
+            "inactive_helper": inactive_section,
         },
         "refresh_delta": _build_refresh_delta(raw),
         "snapshot_meta": {
             "latest_snapshot_time": str(latest_ts) if latest_ts is not None else None,
             "previous_snapshot_time": str(previous_ts) if previous_ts is not None else None,
+            "comparison_mode": comparison_mode,
         },
     }
     json_payload = jsonable_encoder(payload)
@@ -556,13 +651,13 @@ def dashboard_api(
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="启动异常期权 Dashboard API 服务")
-    parser.add_argument("--host", default="127.0.0.1", help="监听地址，默认 127.0.0.1")
-    parser.add_argument("--port", type=int, default=8000, help="监听端口，默认 8000")
+    parser = argparse.ArgumentParser(description="鍚姩寮傚父鏈熸潈 Dashboard API 鏈嶅姟")
+    parser.add_argument("--host", default="127.0.0.1", help="鐩戝惉鍦板潃锛岄粯璁?127.0.0.1")
+    parser.add_argument("--port", type=int, default=8000, help="鐩戝惉绔彛锛岄粯璁?8000")
     parser.add_argument(
         "--reload",
         action="store_true",
-        help="开发模式自动重载（需要从项目根目录启动）",
+        help="寮€鍙戞ā寮忚嚜鍔ㄩ噸杞斤紙闇€瑕佷粠椤圭洰鏍圭洰褰曞惎鍔級",
     )
     return parser
 
@@ -591,6 +686,8 @@ def dashboard() -> None:
     parser = _build_parser()
     args = parser.parse_args()
     run_dashboard_api_server(host=args.host, port=args.port, reload=args.reload)
+
+
 
 
 

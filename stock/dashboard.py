@@ -56,6 +56,11 @@ def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
         "dte": 0,
         "is_new": 0,
         "is_refreshed": 0,
+        "inactive": 0,
+        "previous_options_volume": 0,
+        "previous_open_interest": 0,
+        "delta_volume": 0,
+        "delta_open_interest": 0,
     }
     for col, default in numeric_defaults.items():
         if col not in out.columns:
@@ -77,6 +82,7 @@ def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
 
     out["is_new"] = out["is_new"].astype(int)
     out["is_refreshed"] = out["is_refreshed"].astype(int)
+    out["inactive"] = out["inactive"].astype(int)
     out["is_call"] = (out["option_type"] == "CALL").astype(int)
     out["is_put"] = (out["option_type"] == "PUT").astype(int)
 

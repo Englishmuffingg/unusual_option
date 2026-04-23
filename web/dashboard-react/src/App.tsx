@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+﻿import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { fetchDashboard } from './lib/api'
 import { DashboardResponse } from './lib/types'
 
@@ -33,6 +33,18 @@ type RawContract = {
   delta_open_interest?: number
 }
 
+type RawInactiveContract = {
+  contract_signature?: string
+  ticker?: string
+  contract_symbol?: string
+  contract_display_name?: string
+  option_type?: string
+  expiration_date?: string
+  strike?: number
+  previous_options_volume?: number
+  previous_open_interest?: number
+}
+
 type ContractRow = {
   id: string
   recordedAt: string
@@ -58,6 +70,18 @@ type ContractRow = {
   deltaOpenInterest: number | null
 }
 
+type InactiveRow = {
+  id: string
+  ticker: string
+  contractSymbol: string
+  contractDisplayName: string
+  optionType: 'Call' | 'Put'
+  expirationDate: string
+  strike: number
+  previousOptionsVolume: number
+  previousOpenInterest: number
+}
+
 type StrikeBucket = { label: string; min: number; max: number; volume: number }
 
 const CARD_CLASS = 'rounded-2xl border border-slate-200 bg-white p-4 shadow-sm'
@@ -67,9 +91,9 @@ const DASHBOARD_POLL_MS = 60_000
 const dteLabelMap: Record<DteFilter, string> = {
   all: '全部',
   '0dte': '0DTE',
-  '1_3': '1到3天',
-  '4_10': '4到10天',
-  '11_30': '11到30天',
+  '1_3': '1-3天',
+  '4_10': '4-10天',
+  '11_30': '11-30天',
   gt30: '30天以上',
 }
 
@@ -106,6 +130,21 @@ function normalizeRow(raw: RawContract, idx: number): ContractRow {
   }
 }
 
+function normalizeInactiveRow(raw: RawInactiveContract, idx: number): InactiveRow {
+  const optionType = String(raw.option_type ?? '').toLowerCase().startsWith('p') ? 'Put' : 'Call'
+  return {
+    id: String(raw.contract_signature ?? raw.contract_symbol ?? `inactive-${idx}`),
+    ticker: String(raw.ticker ?? '-').toUpperCase(),
+    contractSymbol: String(raw.contract_symbol ?? '-'),
+    contractDisplayName: String(raw.contract_display_name ?? raw.contract_symbol ?? '-'),
+    optionType,
+    expirationDate: raw.expiration_date ? String(raw.expiration_date) : '-',
+    strike: toNumber(raw.strike),
+    previousOptionsVolume: toNumber(raw.previous_options_volume),
+    previousOpenInterest: toNumber(raw.previous_open_interest),
+  }
+}
+
 function formatCompact(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`
@@ -134,9 +173,9 @@ function dteBucket(dte: number): DteFilter {
 }
 
 function getBias(callShare: number, putShare: number): { text: string; cls: string } {
-  if (putShare > 0.6) return { text: 'Put偏重', cls: 'text-rose-700 bg-rose-50 border-rose-200' }
-  if (callShare > 0.6) return { text: 'Call偏重', cls: 'text-emerald-700 bg-emerald-50 border-emerald-200' }
-  return { text: '流向混合', cls: 'text-amber-700 bg-amber-50 border-amber-200' }
+  if (putShare > 0.6) return { text: 'Put鍋忛噸', cls: 'text-rose-700 bg-rose-50 border-rose-200' }
+  if (callShare > 0.6) return { text: 'Call鍋忛噸', cls: 'text-emerald-700 bg-emerald-50 border-emerald-200' }
+  return { text: '娴佸悜娣峰悎', cls: 'text-amber-700 bg-amber-50 border-amber-200' }
 }
 
 function strikeBuckets(rows: ContractRow[]): StrikeBucket[] {
@@ -181,6 +220,7 @@ export default function App() {
   const [selectedStrikeRange, setSelectedStrikeRange] = useState<{ min: number; max: number } | null>(null)
   const [selectionSource, setSelectionSource] = useState<string | null>(null)
   const [newExpanded, setNewExpanded] = useState(false)
+  const [inactiveExpanded, setInactiveExpanded] = useState(false)
   const [newSort, setNewSort] = useState<'volume' | 'vol_oi' | 'time'>('volume')
 
   const [tableSort, setTableSort] = useState<{ key: keyof ContractRow; dir: 'asc' | 'desc' }>({
@@ -241,6 +281,11 @@ export default function App() {
     return raw.map(normalizeRow)
   }, [data])
 
+  const inactiveRows = useMemo(() => {
+    const raw = (data?.sections?.inactive_helper?.contracts ?? []) as RawInactiveContract[]
+    return raw.map(normalizeInactiveRow)
+  }, [data])
+
   const filteredRows = useMemo(() => {
     return rows.filter((row) => {
       if (selectedTicker && row.ticker !== selectedTicker) return false
@@ -248,7 +293,7 @@ export default function App() {
       if (optionFilter === 'put' && row.optionType !== 'Put') return false
       if (dteFilter !== 'all' && dteBucket(row.dte) !== dteFilter) return false
       if (statusFilter === 'new' && !row.isNew) return false
-      if (statusFilter === 'continuing' && row.isNew) return false
+      if (statusFilter === 'continuing' && !row.isRefreshed) return false
       if (selectedStrikeRange && (row.strike < selectedStrikeRange.min || row.strike > selectedStrikeRange.max)) return false
       return true
     })
@@ -310,7 +355,7 @@ export default function App() {
     return {
       totalContracts: filteredRows.length,
       newContracts: filteredRows.filter((r) => r.isNew).length,
-      continuingContracts: filteredRows.filter((r) => !r.isNew || r.isRefreshed).length,
+      continuingContracts: filteredRows.filter((r) => r.isRefreshed).length,
       totalVolume,
       callShare: totalVolume ? callVolume / totalVolume : 0,
       putShare: totalVolume ? putVolume / totalVolume : 0,
@@ -332,11 +377,19 @@ export default function App() {
   const continuingRows = useMemo(
     () =>
       filteredRows
-        .filter((r) => !r.isNew || r.isRefreshed)
+        .filter((r) => r.isRefreshed)
         .sort((a, b) => b.optionsVolume - a.optionsVolume)
         .slice(0, ACTIVITY_TOP_N),
     [filteredRows],
   )
+
+  const comparisonText = useMemo(() => {
+    const latest = data?.snapshot_meta?.latest_snapshot_time
+    const previous = data?.snapshot_meta?.previous_snapshot_time
+    if (!latest) return '当前基准：最近一次有效变化快照'
+    if (!previous) return `当前基准：最新快照 ${formatShortTime(String(latest))}，此前暂无有效变化快照`
+    return `当前基准：${formatShortTime(String(previous))} -> ${formatShortTime(String(latest))}（最近一次有效变化快照）`
+  }, [data])
 
   const dteChartData = useMemo(() => {
     const labels: DteFilter[] = ['0dte', '1_3', '4_10', '11_30', 'gt30']
@@ -381,7 +434,7 @@ export default function App() {
   const activeFilters = useMemo(() => {
     const list: Array<{ key: string; label: string; clear: () => void }> = []
     if (selectedTicker) list.push({ key: 'ticker', label: `标的：${selectedTicker}`, clear: () => setSelectedTicker(null) })
-    if (optionFilter !== 'all') list.push({ key: 'option', label: `方向：${optionFilter === 'call' ? '仅Call' : '仅Put'}`, clear: () => setOptionFilter('all') })
+    if (optionFilter !== 'all') list.push({ key: 'option', label: `方向：${optionFilter === 'call' ? '仅 Call' : '仅 Put'}`, clear: () => setOptionFilter('all') })
     if (dteFilter !== 'all') list.push({ key: 'dte', label: `DTE：${dteLabelMap[dteFilter]}`, clear: () => setDteFilter('all') })
     if (statusFilter !== 'all') list.push({ key: 'status', label: `状态：${statusFilter === 'new' ? '仅新增' : '仅延续'}`, clear: () => setStatusFilter('all') })
     if (selectedContract) list.push({ key: 'contract', label: `合约：${selectedContract}`, clear: () => setSelectedContract(null) })
@@ -417,6 +470,7 @@ export default function App() {
     setSelectedStrikeRange(null)
     setSelectionSource(null)
     setNewExpanded(false)
+    setInactiveExpanded(false)
     setNewSort('volume')
   }
 
@@ -427,7 +481,7 @@ export default function App() {
   return (
     <div className="mx-auto max-w-[1500px] space-y-4 bg-white p-4 text-slate-900">
       <section className={CARD_CLASS}>
-        <h1 className="text-2xl font-bold">异常期权成交监控（异常流阅读器）</h1>
+        <h1 className="text-2xl font-bold">异常期权成交监控（异常行为阅读器）</h1>
         <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-6">
           <div className="lg:col-span-1">
             <div className="mb-1 text-sm text-slate-500">数据源</div>
@@ -462,9 +516,9 @@ export default function App() {
             <select value={dteFilter} onChange={(e) => setDteFilter(e.target.value as DteFilter)} className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm">
               <option value="all">全部</option>
               <option value="0dte">0DTE</option>
-              <option value="1_3">1到3天</option>
-              <option value="4_10">4到10天</option>
-              <option value="11_30">11到30天</option>
+              <option value="1_3">1-3天</option>
+              <option value="4_10">4-10天</option>
+              <option value="11_30">11-30天</option>
               <option value="gt30">30天以上</option>
             </select>
           </label>
@@ -474,7 +528,7 @@ export default function App() {
               <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as StatusFilter)} className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm">
                 <option value="all">全部</option>
                 <option value="new">仅新增</option>
-                <option value="continuing">仅延续/已刷新</option>
+                <option value="continuing">仅延续</option>
               </select>
               <button onClick={clearAll} className="rounded-xl border border-slate-300 px-3 text-sm hover:bg-slate-50">清空</button>
             </div>
@@ -491,13 +545,14 @@ export default function App() {
       {error && <section className={CARD_CLASS + ' text-rose-600'}>加载失败：{error}</section>}
 
       {!loading && !error && rows.length === 0 && (
-        <section className={CARD_CLASS}>当前数据源暂无匹配结果。</section>
+        <section className={CARD_CLASS}>当前数据源暂时没有匹配结果。</section>
       )}
 
       {!loading && !error && rows.length > 0 && (
         <>
           <section className={CARD_CLASS}>
             <h2 className="mb-3 text-lg font-semibold">全局概览</h2>
+            <p className="mb-3 text-xs text-slate-500">{comparisonText}</p>
             <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
               <MetricCard label="新增合约数" value={summary.newContracts} />
               <MetricCard label="延续合约数" value={summary.continuingContracts} />
@@ -523,7 +578,7 @@ export default function App() {
                     className={`rounded-xl border px-3 py-2 text-left text-sm ${selectedTicker === item.ticker ? 'border-slate-900 bg-slate-100' : `border-slate-200 ${bias.cls}`}`}
                   >
                     <div className="font-semibold">{item.ticker}</div>
-                    <div className="text-xs">+{formatCompact(item.newVolume)} / 总{formatCompact(item.total)}</div>
+                    <div className="text-xs">新增 {formatCompact(item.newVolume)} / 总量 {formatCompact(item.total)}</div>
                   </button>
                 )
               })}
@@ -535,7 +590,7 @@ export default function App() {
             {filteredRows.length === 0 ? (
               <div className="text-sm text-slate-500">当前筛选下没有匹配数据。</div>
             ) : (
-              <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6 text-sm">
+              <div className="grid grid-cols-2 gap-3 text-sm md:grid-cols-3 lg:grid-cols-6">
                 <Fact label="当前标的" value={selectedTicker ?? '全局视图'} />
                 <Fact label="平均 Vol/OI" value={summary.avgVolOi.toFixed(2)} />
                 <Fact label="最高 Vol/OI" value={summary.maxVolOi.toFixed(2)} />
@@ -550,7 +605,7 @@ export default function App() {
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
               <div>
                 <h2 className="text-lg font-semibold">新增活动</h2>
-                <p className="mt-1 text-xs text-slate-500">默认展示前 {ACTIVITY_TOP_N} 条，可展开查看全部新增合约。</p>
+                <p className="mt-1 text-xs text-slate-500">相对于最近一次有效变化快照新增，默认显示前 {ACTIVITY_TOP_N} 条。</p>
               </div>
               <label className="text-xs text-slate-500">
                 排序：
@@ -668,7 +723,7 @@ export default function App() {
 
           <section className={CARD_CLASS}>
             <h2 className="mb-3 text-lg font-semibold">延续活动</h2>
-            <p className="mb-3 text-xs text-slate-500">侧重展示合约延续情况与变化信息（含 OI 变化占位）。</p>
+            <p className="mb-3 text-xs text-slate-500">相对于最近一次有效变化快照仍在持续异常出现，并展示 Vol / OI 的前后变化。</p>
             <ContinuingActivityPanel
               rows={continuingRows}
               onSelect={(contract) => {
@@ -677,6 +732,24 @@ export default function App() {
               }}
               selected={selectedContract}
             />
+          </section>
+
+          <section className="rounded-2xl border border-slate-200 bg-slate-50 p-4 shadow-sm">
+            <div className="mb-3 flex items-center justify-between gap-2">
+              <div>
+                <h2 className="text-lg font-semibold text-slate-700">不再异常</h2>
+                <p className="mt-1 text-xs text-slate-500">
+                  这些合约相对于最近一次有效变化快照未继续被异常捕捉，不代表仓位已关闭。
+                </p>
+              </div>
+              <button
+                onClick={() => setInactiveExpanded((v) => !v)}
+                className="rounded-lg border border-slate-300 px-3 py-1 text-sm text-slate-600 hover:bg-white"
+              >
+                {inactiveExpanded ? '收起' : `展开查看（${inactiveRows.length}）`}
+              </button>
+            </div>
+            <InactiveActivityPanel rows={inactiveExpanded ? inactiveRows : inactiveRows.slice(0, 6)} />
           </section>
 
           <section className={CARD_CLASS}>
@@ -850,16 +923,16 @@ function ContinuingActivityPanel({ rows, onSelect, selected }: { rows: ContractR
               </div>
               <div className="mt-2 grid grid-cols-1 gap-1 text-xs sm:grid-cols-2">
                 <div className="text-slate-600">
-                  Vol: {prevVol == null ? '—' : formatCompact(prevVol)} → {formatCompact(r.optionsVolume)}
+                  Vol: {prevVol == null ? '--' : formatCompact(prevVol)} {'->'} {formatCompact(r.optionsVolume)}
                 </div>
                 <div className={deltaCls(deltaVol)}>
-                  ΔVol: {deltaVol == null ? '待接入' : `${deltaVol >= 0 ? '↑' : '↓'} ${formatCompact(Math.abs(deltaVol))}`}
+                  ΔVol: {deltaVol == null ? '待接入' : `${deltaVol >= 0 ? '+' : '-'}${formatCompact(Math.abs(deltaVol))}`}
                 </div>
                 <div className="text-slate-600">
-                  OI: {prevOi == null ? '—' : formatCompact(prevOi)} → {formatCompact(r.openInterest)}
+                  OI: {prevOi == null ? '--' : formatCompact(prevOi)} {'->'} {formatCompact(r.openInterest)}
                 </div>
                 <div className={deltaCls(deltaOi)}>
-                  ΔOI: {deltaOi == null ? '待接入' : `${deltaOi >= 0 ? '↑' : '↓'} ${formatCompact(Math.abs(deltaOi))}`}
+                  ΔOI: {deltaOi == null ? '待接入' : `${deltaOi >= 0 ? '+' : '-'}${formatCompact(Math.abs(deltaOi))}`}
                 </div>
               </div>
               <div className="mt-2 text-xs text-slate-500">
@@ -872,3 +945,33 @@ function ContinuingActivityPanel({ rows, onSelect, selected }: { rows: ContractR
     )
   )
 }
+
+function InactiveActivityPanel({ rows }: { rows: InactiveRow[] }) {
+  return rows.length === 0 ? (
+    <div className="text-sm text-slate-500">当前没有“不再异常”的合约。</div>
+  ) : (
+    <div className="space-y-2">
+      {rows.map((r) => (
+        <div key={r.id} className="rounded-xl border border-slate-200 bg-white px-3 py-3 text-left">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
+            <div className="flex items-center gap-2">
+              <span className="font-semibold text-slate-700">{r.contractDisplayName}</span>
+              <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${r.optionType === 'Put' ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700'}`}>
+                {r.optionType}
+              </span>
+              <span className="text-xs text-slate-500">{formatShortDate(r.expirationDate)}</span>
+            </div>
+            <div className="text-xs text-slate-500">{r.ticker}</div>
+          </div>
+          <div className="mt-2 flex flex-wrap gap-3 text-xs text-slate-500">
+            <span>Strike {r.strike}</span>
+            <span>此前 Vol {formatCompact(r.previousOptionsVolume)}</span>
+            <span>此前 OI {formatCompact(r.previousOpenInterest)}</span>
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+
