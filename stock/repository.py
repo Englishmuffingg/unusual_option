@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import date, datetime
+from uuid import uuid4
 
 import pandas as pd
 
 from stock import config
 from stock.deduplicate import row_signature
-from stock.database import connect, ensure_table
+from stock.database import connect, ensure_current_state_table, ensure_table
 
 
 def _local_now_iso() -> str:
@@ -68,6 +69,51 @@ def insert_rows(
     return n
 
 
+def _to_py(v: object) -> object:
+    if pd.isna(v):
+        return None
+    if hasattr(v, "item"):
+        try:
+            return v.item()
+        except Exception:
+            return v
+    return v
+
+
+def insert_snapshot_rows(
+    conn: sqlite3.Connection,
+    table: str,
+    df: pd.DataFrame,
+    content_cols: list[str],
+    *,
+    snapshot_at: str,
+    refresh_id: str,
+    signature_flags: dict[str, tuple[int, int]],
+) -> int:
+    """
+    仅追加写入最近快照历史层（不覆盖旧快照）。
+    """
+    if df.empty:
+        return 0
+    col_names = ", ".join(
+        ["recorded_at", "snapshot_at", "refresh_id", "contract_signature", "is_new", "is_refreshed"]
+        + [f'"{c}"' for c in content_cols]
+    )
+    placeholders = ", ".join(["?"] * (6 + len(content_cols)))
+    sql = f'INSERT INTO "{table}" ({col_names}) VALUES ({placeholders})'
+    n = 0
+    for i in range(len(df)):
+        sig = row_signature(df.loc[i], content_cols)
+        is_new, is_refreshed = signature_flags.get(sig, (1, 0))
+        vals: list[object] = [snapshot_at, snapshot_at, refresh_id, sig, is_new, is_refreshed]
+        for c in content_cols:
+            vals.append(_to_py(df.loc[i, c]))
+        conn.execute(sql, vals)
+        n += 1
+    conn.commit()
+    return n
+
+
 def clear_new_flag_when_not_today(
     conn: sqlite3.Connection, table: str, today: date | None = None
 ) -> int:
@@ -90,7 +136,7 @@ def delete_rows_outside_allowed_dates(
     iso = sorted(d.isoformat() for d in allowed_dates)
     placeholders = ",".join("?" * len(iso))
     cur = conn.execute(
-        f'DELETE FROM "{table}" WHERE substr(recorded_at, 1, 10) NOT IN ({placeholders})',
+        f'DELETE FROM "{table}" WHERE substr(COALESCE(snapshot_at, recorded_at), 1, 10) NOT IN ({placeholders})',
         iso,
     )
     conn.commit()
@@ -154,9 +200,11 @@ def ingest_dataframe(
 ) -> tuple[int, int, int]:
     """
     校验 + 去重 + 入库。返回 (插入行数, 丢弃空值行数, 去重跳过行数)。
-    同一批内先清掉非今天的 NEW，再插入新行（is_new=1）。
+    新逻辑：
+    - 快照历史层 append（每轮独立 refresh_id）
+    - current_state 层 upsert（每签名保留最新状态）
     """
-    from stock import deduplicate, validate
+    from stock import validate
 
     table = table or config.TABLE_NAME
     snapshot_ts: str | None = None
@@ -171,32 +219,138 @@ def ingest_dataframe(
 
     content_cols = list(cleaned.columns)
     snapshot_ts = snapshot_ts or _local_now_iso()
+    refresh_id = f"{table}-{snapshot_ts}-{uuid4().hex[:8]}"
     conn = connect()
     try:
         ensure_table(conn, table, content_cols)
-        signature_to_ids = load_existing_signature_ids(conn, table, content_cols)
-        existing = set(signature_to_ids.keys())
-        seen_existing_signatures: set[str] = set()
+        state_table = ensure_current_state_table(conn, table)
+
+        # 只做“同一批内”去重，保证每轮快照 append 稳定。
+        keep_idx: list[int] = []
+        seen_batch: set[str] = set()
+        dup_skip = 0
         for i in range(len(cleaned)):
             sig = row_signature(cleaned.loc[i], content_cols)
-            if sig in existing:
-                seen_existing_signatures.add(sig)
-        new_df, dup_skip = deduplicate.filter_new_by_signature(
-            cleaned, content_cols, existing
-        )
-        clear_new_flag_when_not_today(conn, table)
-        refreshed = refresh_existing_rows_for_seen_signatures(
+            if sig in seen_batch:
+                dup_skip += 1
+                continue
+            seen_batch.add(sig)
+            keep_idx.append(i)
+        batch_df = cleaned.iloc[keep_idx].reset_index(drop=True)
+
+        existing_state = {
+            row[0]
+            for row in conn.execute(f'SELECT contract_signature FROM "{state_table}"').fetchall()
+            if row and row[0]
+        }
+        signature_flags = {
+            sig: (0, 1) if sig in existing_state else (1, 0) for sig in seen_batch
+        }
+
+        inserted = insert_snapshot_rows(
             conn,
             table,
-            signature_to_ids,
-            seen_existing_signatures,
-            recorded_at=snapshot_ts,
+            batch_df,
+            content_cols,
+            snapshot_at=snapshot_ts,
+            refresh_id=refresh_id,
+            signature_flags=signature_flags,
         )
-        inserted = insert_rows(
-            conn, table, new_df, content_cols, recorded_at=snapshot_ts
+
+        upsert_current_state(
+            conn,
+            state_table=state_table,
+            df=batch_df,
+            content_cols=content_cols,
+            snapshot_at=snapshot_ts,
+            refresh_id=refresh_id,
         )
-        if refreshed:
-            print(f"[{table}] 重复命中：刷新时间并标记 is_refreshed=1 的行 {refreshed}")
+        clear_new_flag_when_not_today(conn, table)
         return inserted, dropped, dup_skip
     finally:
         conn.close()
+
+
+def upsert_current_state(
+    conn: sqlite3.Connection,
+    *,
+    state_table: str,
+    df: pd.DataFrame,
+    content_cols: list[str],
+    snapshot_at: str,
+    refresh_id: str,
+) -> int:
+    if df.empty:
+        return 0
+
+    field_map = {
+        "ticker": "ticker",
+        "ticker_type": "ticker_type",
+        "contract_symbol": "contract_symbol",
+        "contract_display_name": "contract_display_name",
+        "option_type": "option_type",
+        "expiration_date": "expiration_date",
+        "strike": "strike",
+        "dte": "dte",
+        "options_volume": "options_volume",
+        "open_interest": "open_interest",
+        "volume_to_open_interest_ratio": "volume_to_open_interest_ratio",
+        "bid_price": "bid_price",
+        "ask_price": "ask_price",
+        "mid_price": "mid_price",
+    }
+    sql = f'''
+        INSERT INTO "{state_table}" (
+            contract_signature, ticker, ticker_type, contract_symbol, contract_display_name,
+            option_type, expiration_date, strike, dte,
+            options_volume, open_interest, volume_to_open_interest_ratio,
+            bid_price, ask_price, mid_price,
+            first_seen_at, last_seen_at, last_refresh_id
+        ) VALUES (
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        )
+        ON CONFLICT(contract_signature) DO UPDATE SET
+            ticker=excluded.ticker,
+            ticker_type=excluded.ticker_type,
+            contract_symbol=excluded.contract_symbol,
+            contract_display_name=excluded.contract_display_name,
+            option_type=excluded.option_type,
+            expiration_date=excluded.expiration_date,
+            strike=excluded.strike,
+            dte=excluded.dte,
+            options_volume=excluded.options_volume,
+            open_interest=excluded.open_interest,
+            volume_to_open_interest_ratio=excluded.volume_to_open_interest_ratio,
+            bid_price=excluded.bid_price,
+            ask_price=excluded.ask_price,
+            mid_price=excluded.mid_price,
+            last_seen_at=excluded.last_seen_at,
+            last_refresh_id=excluded.last_refresh_id
+    '''
+    n = 0
+    for i in range(len(df)):
+        sig = row_signature(df.loc[i], content_cols)
+        vals: list[object] = [sig]
+        for c in [
+            "ticker",
+            "ticker_type",
+            "contract_symbol",
+            "contract_display_name",
+            "option_type",
+            "expiration_date",
+            "strike",
+            "dte",
+            "options_volume",
+            "open_interest",
+            "volume_to_open_interest_ratio",
+            "bid_price",
+            "ask_price",
+            "mid_price",
+        ]:
+            src = field_map[c]
+            vals.append(_to_py(df.loc[i, src]) if src in df.columns else None)
+        vals.extend([snapshot_at, snapshot_at, refresh_id])
+        conn.execute(sql, vals)
+        n += 1
+    conn.commit()
+    return n

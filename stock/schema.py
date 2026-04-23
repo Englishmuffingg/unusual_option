@@ -5,7 +5,15 @@ import re
 import pandas as pd
 
 
-_RESERVED = {"id", "recorded_at", "is_new"}
+_RESERVED = {
+    "id",
+    "recorded_at",
+    "snapshot_at",
+    "refresh_id",
+    "contract_signature",
+    "is_new",
+    "is_refreshed",
+}
 
 
 def sql_safe_column(name: str) -> str:

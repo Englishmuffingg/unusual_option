@@ -180,26 +180,67 @@ def _section_payload(df: pd.DataFrame, name: str, dataset_name: str) -> dict[str
     }
 
 
-def _build_refresh_delta(df: pd.DataFrame) -> dict[str, Any]:
-    if df.empty or "recorded_at" not in df.columns or "contract_symbol" not in df.columns:
-        return {
-            "snapshot_time": None,
-            "previous_snapshot_time": None,
-            "contract_count_delta": 0,
-            "options_volume_delta": 0,
-            "estimated_premium_delta": 0,
-            "open_interest_delta": 0,
-            "new_contract_count": 0,
-            "disappeared_contract_count": 0,
-            "persistent_contract_count": 0,
-            "ticker_rank": [],
-            "contract_changes": [],
-        }
+def _ensure_contract_signature(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    if "contract_signature" not in out.columns:
+        out["contract_signature"] = ""
+    out["contract_signature"] = out["contract_signature"].fillna("").astype(str).str.strip()
+    missing = out["contract_signature"] == ""
+    if missing.any():
+        parts = (
+            out.get("ticker", "").astype(str).str.upper().fillna("")
+            + "|"
+            + out.get("contract_symbol", "").astype(str).fillna("")
+            + "|"
+            + out.get("expiration_date", "").astype(str).fillna("")
+            + "|"
+            + out.get("strike", "").astype(str).fillna("")
+            + "|"
+            + out.get("option_type", "").astype(str).str.upper().fillna("")
+        )
+        out.loc[missing, "contract_signature"] = parts.loc[missing]
+    return out
 
-    work = df.copy()
-    work["recorded_at"] = pd.to_datetime(work["recorded_at"], errors="coerce")
-    work = work[work["recorded_at"].notna()]
+
+def _latest_previous_frames(raw_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, Any, Any]:
+    if raw_df.empty:
+        return raw_df.iloc[0:0].copy(), raw_df.iloc[0:0].copy(), None, None
+    work = _ensure_contract_signature(raw_df)
+    ts_col = "snapshot_at" if "snapshot_at" in work.columns else "recorded_at"
+    if ts_col not in work.columns:
+        return work.iloc[0:0].copy(), work.iloc[0:0].copy(), None, None
+    work[ts_col] = pd.to_datetime(work[ts_col], errors="coerce")
+    work = work[work[ts_col].notna()].copy()
     if work.empty:
+        return work.iloc[0:0].copy(), work.iloc[0:0].copy(), None, None
+
+    if "refresh_id" in work.columns and work["refresh_id"].fillna("").astype(str).str.strip().ne("").any():
+        ref = (
+            work[["refresh_id", ts_col]]
+            .dropna()
+            .sort_values(ts_col)
+            .drop_duplicates(subset=["refresh_id"], keep="last")
+        )
+        ids = ref["refresh_id"].tolist()
+        latest_id = ids[-1]
+        prev_id = ids[-2] if len(ids) >= 2 else None
+        latest_df = work[work["refresh_id"] == latest_id].copy()
+        prev_df = work[work["refresh_id"] == prev_id].copy() if prev_id is not None else work.iloc[0:0].copy()
+        latest_ts = ref[ref["refresh_id"] == latest_id][ts_col].iloc[-1]
+        prev_ts = ref[ref["refresh_id"] == prev_id][ts_col].iloc[-1] if prev_id is not None else None
+        return latest_df, prev_df, latest_ts, prev_ts
+
+    snaps = sorted(work[ts_col].dropna().unique())
+    latest = snaps[-1]
+    previous = snaps[-2] if len(snaps) >= 2 else None
+    latest_df = work[work[ts_col] == latest].copy()
+    prev_df = work[work[ts_col] == previous].copy() if previous is not None else work.iloc[0:0].copy()
+    return latest_df, prev_df, latest, previous
+
+
+def _build_refresh_delta(raw_df: pd.DataFrame) -> dict[str, Any]:
+    latest_df, prev_df, latest_ts, previous_ts = _latest_previous_frames(raw_df)
+    if latest_df.empty:
         return {
             "snapshot_time": None,
             "previous_snapshot_time": None,
@@ -214,15 +255,15 @@ def _build_refresh_delta(df: pd.DataFrame) -> dict[str, Any]:
             "contract_changes": [],
         }
 
-    snapshots = sorted(work["recorded_at"].dropna().unique())
-    latest = snapshots[-1]
-    previous = snapshots[-2] if len(snapshots) >= 2 else None
+    current_df = normalize_df(latest_df)
+    prev_df = normalize_df(prev_df)
+    current_df = _ensure_contract_signature(current_df)
+    prev_df = _ensure_contract_signature(prev_df)
 
-    current_df = work[work["recorded_at"] == latest].copy()
-    prev_df = work[work["recorded_at"] == previous].copy() if previous is not None else work.iloc[0:0].copy()
-
-    key_cols = ["ticker", "contract_symbol"]
+    key_cols = ["contract_signature"]
     agg_map = {
+        "ticker": "first",
+        "contract_symbol": "first",
         "contract_display_name": "first",
         "option_type": "first",
         "strike": "first",
@@ -287,8 +328,8 @@ def _build_refresh_delta(df: pd.DataFrame) -> dict[str, Any]:
     change_rows = change_rows.sort_values("delta_premium", ascending=False).head(800)
 
     return {
-        "snapshot_time": str(latest),
-        "previous_snapshot_time": str(previous) if previous is not None else None,
+        "snapshot_time": str(latest_ts) if latest_ts is not None else None,
+        "previous_snapshot_time": str(previous_ts) if previous_ts is not None else None,
         "contract_count_delta": int(len(cur) - len(prev)),
         "options_volume_delta": _to_float(cur["options_volume"].sum() - prev["options_volume"].sum(), 0),
         "estimated_premium_delta": _to_float(cur["estimated_premium"].sum() - prev["estimated_premium"].sum(), 2),
@@ -335,10 +376,37 @@ def dashboard(
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"读取数据库失败: {exc}") from exc
 
-    df = normalize_df(raw)
+    try:
+        current_raw = load_table_read_only(DB_PATH, f"{table}_current_state")
+    except Exception:
+        current_raw = pd.DataFrame()
+
+    latest_raw, previous_raw, latest_ts, previous_ts = _latest_previous_frames(raw)
+    latest_df = _ensure_contract_signature(normalize_df(latest_raw))
+    previous_df = _ensure_contract_signature(normalize_df(previous_raw))
+
+    if current_raw.empty:
+        df = latest_df.copy()
+    else:
+        df = _ensure_contract_signature(normalize_df(current_raw))
+        df["recorded_at"] = current_raw.get("last_seen_at")
+        df["snapshot_at"] = current_raw.get("last_seen_at")
+        df["refresh_id"] = current_raw.get("last_refresh_id")
+        df["is_new"] = 0
+        df["is_refreshed"] = 0
+
     if "is_refreshed" not in df.columns:
         df["is_refreshed"] = 0
     df["is_refreshed"] = pd.to_numeric(df["is_refreshed"], errors="coerce").fillna(0).astype(int)
+    if "is_new" not in df.columns:
+        df["is_new"] = 0
+    df["is_new"] = pd.to_numeric(df["is_new"], errors="coerce").fillna(0).astype(int)
+
+    latest_keys = set(latest_df["contract_signature"].astype(str).tolist()) if not latest_df.empty else set()
+    prev_keys = set(previous_df["contract_signature"].astype(str).tolist()) if not previous_df.empty else set()
+    if latest_keys:
+        df["is_new"] = df["contract_signature"].isin(latest_keys - prev_keys).astype(int)
+        df["is_refreshed"] = df["contract_signature"].isin(latest_keys & prev_keys).astype(int)
 
     refreshed_df = df[df["is_refreshed"] == 1].copy()
     today_new_df = df[df["is_new"] == 1].copy()
@@ -377,8 +445,8 @@ def dashboard(
         "metric_explanations": [
             "Call 权利金占比高 = 更偏多",
             "Put 权利金占比高 = 更偏防守",
-            "is_refreshed = 本次刷新新增",
-            "is_new = 今日新增",
+            "is_new = latest 有、previous 没有（新增）",
+            "is_refreshed = latest 与 previous 都有（延续）",
             "median_dte = 主流期限结构",
             "avg_ratio / max_ratio = 异常程度",
             "bullish_score = Call 权利金占比 - Put 权利金占比",
@@ -388,7 +456,11 @@ def dashboard(
             "today_new": today_section,
             "overall": overall_section,
         },
-        "refresh_delta": _build_refresh_delta(df),
+        "refresh_delta": _build_refresh_delta(raw),
+        "snapshot_meta": {
+            "latest_snapshot_time": str(latest_ts) if latest_ts is not None else None,
+            "previous_snapshot_time": str(previous_ts) if previous_ts is not None else None,
+        },
     }
     json_payload = jsonable_encoder(payload)
     if pretty == 1:
