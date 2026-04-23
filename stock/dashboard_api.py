@@ -411,7 +411,7 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main() -> None:
+def dashboard() -> None:
     parser = _build_parser()
     args = parser.parse_args()
     try:
@@ -431,5 +431,4 @@ def main() -> None:
     uvicorn.run(app, host=args.host, port=args.port, reload=False)
 
 
-if __name__ == "__main__":
-    main()
+
