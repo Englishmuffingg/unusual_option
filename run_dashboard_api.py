@@ -1,4 +1,4 @@
-"""项目根目录启动脚本：避免模块路径问题。"""
+"""Project-root API launcher."""
 
 from stock.dashboard_api import dashboard
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from etf import config as etf_config
 from etf.fetcher import fetch_etf_dataframe
@@ -12,7 +13,7 @@ from stock.schema import normalize_dataframe_columns
 def run_ingestion() -> None:
     df = fetch_etf_dataframe()
     df = normalize_dataframe_columns(df)
-    ts = datetime.now().astimezone().replace(microsecond=0).isoformat()
+    ts = datetime.now(ZoneInfo("America/Chicago")).replace(microsecond=0).isoformat()
     df = df.copy()
     df["snapshot_at"] = ts
     print("[etf] 快照时间 snapshot_at（写入 recorded_at）:", ts)

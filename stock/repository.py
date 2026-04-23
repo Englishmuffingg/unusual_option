@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import date, datetime
+from zoneinfo import ZoneInfo
 from uuid import uuid4
 
 import pandas as pd
@@ -12,7 +13,7 @@ from stock.database import connect, ensure_current_state_table, ensure_table
 
 
 def _local_now_iso() -> str:
-    return datetime.now().astimezone().replace(microsecond=0).isoformat()
+    return datetime.now(ZoneInfo("America/Chicago")).replace(microsecond=0).isoformat()
 
 
 def load_existing_signature_ids(

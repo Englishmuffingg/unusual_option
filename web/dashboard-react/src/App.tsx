@@ -29,6 +29,8 @@ type RawContract = {
   dte?: number
   previous_options_volume?: number
   previous_open_interest?: number
+  delta_volume?: number
+  delta_open_interest?: number
 }
 
 type ContractRow = {
@@ -52,6 +54,8 @@ type ContractRow = {
   dte: number
   previousOptionsVolume: number | null
   previousOpenInterest: number | null
+  deltaVolume: number | null
+  deltaOpenInterest: number | null
 }
 
 type StrikeBucket = { label: string; min: number; max: number; volume: number }
@@ -96,6 +100,8 @@ function normalizeRow(raw: RawContract, idx: number): ContractRow {
     dte: toNumber(raw.dte),
     previousOptionsVolume: raw.previous_options_volume == null ? null : toNumber(raw.previous_options_volume),
     previousOpenInterest: raw.previous_open_interest == null ? null : toNumber(raw.previous_open_interest),
+    deltaVolume: raw.delta_volume == null ? null : toNumber(raw.delta_volume),
+    deltaOpenInterest: raw.delta_open_interest == null ? null : toNumber(raw.delta_open_interest),
   }
 }
 
@@ -787,8 +793,8 @@ function ContinuingActivityPanel({ rows, onSelect, selected }: { rows: ContractR
         {rows.map((r) => {
           const prevVol = r.previousOptionsVolume
           const prevOi = r.previousOpenInterest
-          const deltaVol = prevVol == null ? null : r.optionsVolume - prevVol
-          const deltaOi = prevOi == null ? null : r.openInterest - prevOi
+          const deltaVol = r.deltaVolume ?? (prevVol == null ? null : r.optionsVolume - prevVol)
+          const deltaOi = r.deltaOpenInterest ?? (prevOi == null ? null : r.openInterest - prevOi)
           const deltaCls = (value: number | null) => (value == null ? 'text-slate-400' : value >= 0 ? 'text-emerald-600' : 'text-rose-600')
 
           return (

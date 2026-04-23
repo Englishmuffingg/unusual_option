@@ -45,43 +45,45 @@ def load_table_read_only(db_path: Path, table_name: str) -> pd.DataFrame:
 def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
 
-    numeric_cols = [
-        "options_volume",
-        "open_interest",
-        "bid_price",
-        "ask_price",
-        "mid_price",
-        "volume_to_open_interest_ratio",
-        "strike",
-        "dte",
-        "is_new",
-    ]
-    for col in numeric_cols:
-        if col in out.columns:
-            out[col] = pd.to_numeric(out[col], errors="coerce")
+    numeric_defaults = {
+        "options_volume": 0,
+        "open_interest": 0,
+        "bid_price": 0,
+        "ask_price": 0,
+        "mid_price": 0,
+        "volume_to_open_interest_ratio": 0,
+        "strike": 0,
+        "dte": 0,
+        "is_new": 0,
+        "is_refreshed": 0,
+    }
+    for col, default in numeric_defaults.items():
+        if col not in out.columns:
+            out[col] = default
+        out[col] = pd.to_numeric(out[col], errors="coerce").fillna(default)
 
     for col in ["recorded_at", "expiration_date"]:
-        if col in out.columns:
-            out[col] = pd.to_datetime(out[col], errors="coerce")
+        if col not in out.columns:
+            out[col] = pd.NaT
+        out[col] = pd.to_datetime(out[col], errors="coerce")
 
-    if "ticker" in out.columns:
-        out["ticker"] = out["ticker"].astype(str).str.upper().str.strip()
+    if "ticker" not in out.columns:
+        out["ticker"] = ""
+    out["ticker"] = out["ticker"].fillna("").astype(str).str.upper().str.strip()
 
-    if "option_type" in out.columns:
-        out["option_type"] = out["option_type"].astype(str).str.upper().str.strip()
+    if "option_type" not in out.columns:
+        out["option_type"] = ""
+    out["option_type"] = out["option_type"].fillna("").astype(str).str.upper().str.strip()
 
-    out["is_new"] = out.get("is_new", 0).fillna(0).astype(int)
-    out["is_call"] = (out.get("option_type", "") == "CALL").astype(int)
-    out["is_put"] = (out.get("option_type", "") == "PUT").astype(int)
+    out["is_new"] = out["is_new"].astype(int)
+    out["is_refreshed"] = out["is_refreshed"].astype(int)
+    out["is_call"] = (out["option_type"] == "CALL").astype(int)
+    out["is_put"] = (out["option_type"] == "PUT").astype(int)
 
-    out["estimated_premium"] = (
-        out.get("options_volume", 0).fillna(0)
-        * out.get("mid_price", 0).fillna(0)
-        * 100
-    )
+    out["estimated_premium"] = out["options_volume"].fillna(0) * out["mid_price"].fillna(0) * 100
 
     out["dte_bucket"] = pd.cut(
-        out.get("dte"),
+        out["dte"],
         bins=DTE_BUCKETS,
         labels=DTE_LABELS,
         include_lowest=True,

@@ -71,11 +71,17 @@ def _build_summary(df: pd.DataFrame) -> pd.DataFrame:
         return summary
 
     summary = summary.copy()
+    for col in ["call_premium_pct", "put_premium_pct", "avg_ratio", "max_ratio", "median_dte"]:
+        if col in summary.columns:
+            summary[col] = pd.to_numeric(summary[col], errors="coerce")
     summary["bullish_score"] = (
         summary["call_premium_pct"].fillna(0) - summary["put_premium_pct"].fillna(0)
     )
     summary["flow_desc"] = summary.apply(
-        lambda r: _flow_desc(float(r.get("call_premium_pct", 0) or 0), float(r.get("put_premium_pct", 0) or 0)),
+        lambda r: _flow_desc(
+            float(r["call_premium_pct"]) if pd.notna(r["call_premium_pct"]) else 0.0,
+            float(r["put_premium_pct"]) if pd.notna(r["put_premium_pct"]) else 0.0,
+        ),
         axis=1,
     )
 
@@ -141,6 +147,8 @@ def _section_payload(df: pd.DataFrame, name: str, dataset_name: str) -> dict[str
 
     contracts_cols = [
         "ticker",
+        "ticker_type",
+        "contract_signature",
         "contract_symbol",
         "contract_display_name",
         "option_type",
@@ -154,6 +162,10 @@ def _section_payload(df: pd.DataFrame, name: str, dataset_name: str) -> dict[str
         "is_refreshed",
         "is_new",
         "recorded_at",
+        "previous_options_volume",
+        "previous_open_interest",
+        "delta_volume",
+        "delta_open_interest",
     ]
     contracts_cols = [c for c in contracts_cols if c in df.columns]
 
@@ -164,7 +176,7 @@ def _section_payload(df: pd.DataFrame, name: str, dataset_name: str) -> dict[str
             .copy()
             .sort_values(["estimated_premium", "options_volume"], ascending=[False, False])
             .head(600)
-            .fillna(0)
+            .where(pd.notna, None)
             .to_dict("records")
         )
 
@@ -186,20 +198,97 @@ def _ensure_contract_signature(df: pd.DataFrame) -> pd.DataFrame:
         out["contract_signature"] = ""
     out["contract_signature"] = out["contract_signature"].fillna("").astype(str).str.strip()
     missing = out["contract_signature"] == ""
+    for col in ["ticker", "contract_symbol", "expiration_date", "strike", "option_type"]:
+        if col not in out.columns:
+            out[col] = ""
     if missing.any():
         parts = (
-            out.get("ticker", "").astype(str).str.upper().fillna("")
+            out["ticker"].fillna("").astype(str).str.upper()
             + "|"
-            + out.get("contract_symbol", "").astype(str).fillna("")
+            + out["contract_symbol"].fillna("").astype(str)
             + "|"
-            + out.get("expiration_date", "").astype(str).fillna("")
+            + out["expiration_date"].fillna("").astype(str)
             + "|"
-            + out.get("strike", "").astype(str).fillna("")
+            + out["strike"].fillna("").astype(str)
             + "|"
-            + out.get("option_type", "").astype(str).str.upper().fillna("")
+            + out["option_type"].fillna("").astype(str).str.upper()
         )
         out.loc[missing, "contract_signature"] = parts.loc[missing]
     return out
+
+
+def _aggregate_snapshot_contracts(df: pd.DataFrame) -> pd.DataFrame:
+    work = _ensure_contract_signature(normalize_df(df))
+    if work.empty:
+        return pd.DataFrame(
+            columns=[
+                "contract_signature",
+                "ticker",
+                "ticker_type",
+                "contract_symbol",
+                "contract_display_name",
+                "option_type",
+                "strike",
+                "expiration_date",
+                "dte",
+                "options_volume",
+                "open_interest",
+                "estimated_premium",
+            ]
+        )
+
+    agg_map = {
+        "ticker": "first",
+        "ticker_type": "first",
+        "contract_symbol": "first",
+        "contract_display_name": "first",
+        "option_type": "first",
+        "strike": "first",
+        "expiration_date": "first",
+        "dte": "first",
+        "options_volume": "sum",
+        "open_interest": "sum",
+        "estimated_premium": "sum",
+    }
+    return work.groupby(["contract_signature"], dropna=False).agg(agg_map).reset_index()
+
+
+def _build_contract_comparison(latest_df: pd.DataFrame, previous_df: pd.DataFrame) -> pd.DataFrame:
+    cur = _aggregate_snapshot_contracts(latest_df)
+    prev = _aggregate_snapshot_contracts(previous_df)
+    merged = cur.merge(prev, on=["contract_signature"], how="outer", suffixes=("_cur", "_prev"))
+    if merged.empty:
+        return merged
+
+    cur_keys = set(cur["contract_signature"].astype(str).tolist())
+    prev_keys = set(prev["contract_signature"].astype(str).tolist())
+    for col in [
+        "options_volume_cur",
+        "options_volume_prev",
+        "open_interest_cur",
+        "open_interest_prev",
+        "estimated_premium_cur",
+        "estimated_premium_prev",
+    ]:
+        if col not in merged.columns:
+            merged[col] = 0
+        merged[col] = pd.to_numeric(merged[col], errors="coerce").fillna(0)
+
+    merged["ticker"] = merged["ticker_cur"] if "ticker_cur" in merged.columns else ""
+    if "ticker_prev" in merged.columns:
+        merged["ticker"] = merged["ticker"].fillna(merged["ticker_prev"])
+    merged["contract_symbol"] = merged["contract_symbol_cur"] if "contract_symbol_cur" in merged.columns else ""
+    if "contract_symbol_prev" in merged.columns:
+        merged["contract_symbol"] = merged["contract_symbol"].fillna(merged["contract_symbol_prev"])
+    merged["in_latest"] = merged["contract_signature"].astype(str).isin(cur_keys)
+    merged["in_previous"] = merged["contract_signature"].astype(str).isin(prev_keys)
+    merged["delta_volume"] = merged["options_volume_cur"] - merged["options_volume_prev"]
+    merged["delta_premium"] = merged["estimated_premium_cur"] - merged["estimated_premium_prev"]
+    merged["delta_open_interest"] = merged["open_interest_cur"] - merged["open_interest_prev"]
+    merged["status"] = "continued"
+    merged.loc[merged["in_latest"] & ~merged["in_previous"], "status"] = "new"
+    merged.loc[~merged["in_latest"] & merged["in_previous"], "status"] = "disappeared"
+    return merged
 
 
 def _latest_previous_frames(raw_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, Any, Any]:
@@ -255,37 +344,9 @@ def _build_refresh_delta(raw_df: pd.DataFrame) -> dict[str, Any]:
             "contract_changes": [],
         }
 
-    current_df = normalize_df(latest_df)
-    prev_df = normalize_df(prev_df)
-    current_df = _ensure_contract_signature(current_df)
-    prev_df = _ensure_contract_signature(prev_df)
-
-    key_cols = ["contract_signature"]
-    agg_map = {
-        "ticker": "first",
-        "contract_symbol": "first",
-        "contract_display_name": "first",
-        "option_type": "first",
-        "strike": "first",
-        "expiration_date": "first",
-        "dte": "first",
-        "options_volume": "sum",
-        "open_interest": "sum",
-        "estimated_premium": "sum",
-    }
-
-    cur = current_df.groupby(key_cols, dropna=False).agg(agg_map).reset_index()
-    prev = prev_df.groupby(key_cols, dropna=False).agg(agg_map).reset_index()
-
-    merged = cur.merge(prev, on=key_cols, how="outer", suffixes=("_cur", "_prev"))
-    merged = merged.fillna(0)
-    merged["delta_volume"] = merged["options_volume_cur"] - merged["options_volume_prev"]
-    merged["delta_premium"] = merged["estimated_premium_cur"] - merged["estimated_premium_prev"]
-    merged["delta_open_interest"] = merged["open_interest_cur"] - merged["open_interest_prev"]
-    merged["status"] = "持续"
-    merged.loc[(merged["estimated_premium_prev"] == 0) & (merged["estimated_premium_cur"] > 0), "status"] = "新增"
-    merged.loc[(merged["estimated_premium_prev"] > 0) & (merged["estimated_premium_cur"] == 0), "status"] = "消失"
-    merged.loc[(merged["estimated_premium_prev"] > 0) & (merged["estimated_premium_cur"] > merged["estimated_premium_prev"]), "status"] = "扩大"
+    cur = _aggregate_snapshot_contracts(latest_df)
+    prev = _aggregate_snapshot_contracts(prev_df)
+    merged = _build_contract_comparison(latest_df, prev_df)
 
     ticker_rank = (
         merged.groupby("ticker", dropna=False)
@@ -293,7 +354,7 @@ def _build_refresh_delta(raw_df: pd.DataFrame) -> dict[str, Any]:
             premium_delta=("delta_premium", "sum"),
             volume_delta=("delta_volume", "sum"),
             open_interest_delta=("delta_open_interest", "sum"),
-            contract_count_delta=("contract_symbol", "count"),
+            contract_count_delta=("contract_signature", "count"),
         )
         .reset_index()
         .sort_values("premium_delta", ascending=False)
@@ -334,11 +395,11 @@ def _build_refresh_delta(raw_df: pd.DataFrame) -> dict[str, Any]:
         "options_volume_delta": _to_float(cur["options_volume"].sum() - prev["options_volume"].sum(), 0),
         "estimated_premium_delta": _to_float(cur["estimated_premium"].sum() - prev["estimated_premium"].sum(), 2),
         "open_interest_delta": _to_float(cur["open_interest"].sum() - prev["open_interest"].sum(), 0),
-        "new_contract_count": int((change_rows["status"] == "新增").sum()),
-        "disappeared_contract_count": int((change_rows["status"] == "消失").sum()),
-        "persistent_contract_count": int((change_rows["status"].isin(["持续", "扩大"])).sum()),
+        "new_contract_count": int((merged["status"] == "new").sum()),
+        "disappeared_contract_count": int((merged["status"] == "disappeared").sum()),
+        "persistent_contract_count": int((merged["status"] == "continued").sum()),
         "ticker_rank": ticker_rank.fillna(0).to_dict("records"),
-        "contract_changes": change_rows.fillna(0).to_dict("records"),
+        "contract_changes": change_rows.where(pd.notna(change_rows), None).to_dict("records"),
     }
 
 
@@ -367,7 +428,7 @@ def index() -> str:
 
 
 @app.get("/api/dashboard")
-def dashboard(
+def dashboard_api(
     table: str = Query("stock", pattern="^(stock|etf)$"),
     pretty: int = Query(0, ge=0, le=1, description="1=格式化输出 JSON，便于浏览器阅读"),
 ) -> dict[str, Any]:
@@ -384,6 +445,7 @@ def dashboard(
     latest_raw, previous_raw, latest_ts, previous_ts = _latest_previous_frames(raw)
     latest_df = _ensure_contract_signature(normalize_df(latest_raw))
     previous_df = _ensure_contract_signature(normalize_df(previous_raw))
+    comparison_df = _build_contract_comparison(latest_raw, previous_raw)
 
     if current_raw.empty:
         df = latest_df.copy()
@@ -392,21 +454,40 @@ def dashboard(
         df["recorded_at"] = current_raw.get("last_seen_at")
         df["snapshot_at"] = current_raw.get("last_seen_at")
         df["refresh_id"] = current_raw.get("last_refresh_id")
-        df["is_new"] = 0
-        df["is_refreshed"] = 0
-
-    if "is_refreshed" not in df.columns:
-        df["is_refreshed"] = 0
-    df["is_refreshed"] = pd.to_numeric(df["is_refreshed"], errors="coerce").fillna(0).astype(int)
-    if "is_new" not in df.columns:
-        df["is_new"] = 0
-    df["is_new"] = pd.to_numeric(df["is_new"], errors="coerce").fillna(0).astype(int)
 
     latest_keys = set(latest_df["contract_signature"].astype(str).tolist()) if not latest_df.empty else set()
     prev_keys = set(previous_df["contract_signature"].astype(str).tolist()) if not previous_df.empty else set()
     if latest_keys:
-        df["is_new"] = df["contract_signature"].isin(latest_keys - prev_keys).astype(int)
-        df["is_refreshed"] = df["contract_signature"].isin(latest_keys & prev_keys).astype(int)
+        df = df[df["contract_signature"].isin(latest_keys)].copy()
+    df["is_new"] = df["contract_signature"].isin(latest_keys - prev_keys).astype(int)
+    df["is_refreshed"] = df["contract_signature"].isin(latest_keys & prev_keys).astype(int)
+
+    if not comparison_df.empty:
+        previous_fields = comparison_df[
+            [
+                "contract_signature",
+                "options_volume_prev",
+                "open_interest_prev",
+                "delta_volume",
+                "delta_open_interest",
+                "in_previous",
+            ]
+        ].rename(
+            columns={
+                "options_volume_prev": "previous_options_volume",
+                "open_interest_prev": "previous_open_interest",
+            }
+        )
+        previous_fields["previous_options_volume"] = previous_fields["previous_options_volume"].where(
+            previous_fields["in_previous"],
+            None,
+        )
+        previous_fields["previous_open_interest"] = previous_fields["previous_open_interest"].where(
+            previous_fields["in_previous"],
+            None,
+        )
+        previous_fields = previous_fields.drop(columns=["in_previous"])
+        df = df.merge(previous_fields, on="contract_signature", how="left")
 
     refreshed_df = df[df["is_refreshed"] == 1].copy()
     today_new_df = df[df["is_new"] == 1].copy()
@@ -483,24 +564,30 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def dashboard() -> None:
-    parser = _build_parser()
-    args = parser.parse_args()
+def run_dashboard_api_server(
+    host: str = "127.0.0.1",
+    port: int = 8000,
+    reload: bool = False,
+) -> None:
     try:
         import uvicorn
     except Exception as exc:  # pragma: no cover
         raise RuntimeError(
-            "缺少 uvicorn，请先执行 `pip install -r requirements.txt`。"
+            "?? uvicorn????? `pip install -r requirements.txt`?"
         ) from exc
-    print(
-        f"[dashboard_api] 启动中: http://{args.host}:{args.port}/api/dashboard?table=stock"
-    )
-    if args.reload:
+    print(f"[dashboard_api] ???: http://{host}:{port}/api/dashboard?table=stock")
+    if reload:
         print(
-            "[dashboard_api] 提示：直接运行脚本时已关闭 --reload 以避免模块路径歧义；"
-            "如需热重载，请使用 `python run_dashboard_api.py --reload`。"
+            "[dashboard_api] ????????????? --reload ??????????"
+            "????????? `python run_dashboard_api.py --reload`?"
         )
-    uvicorn.run(app, host=args.host, port=args.port, reload=False)
+    uvicorn.run(app, host=host, port=port, reload=False)
+
+
+def dashboard() -> None:
+    parser = _build_parser()
+    args = parser.parse_args()
+    run_dashboard_api_server(host=args.host, port=args.port, reload=args.reload)
 
 
 

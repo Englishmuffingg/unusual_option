@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from stock.fetcher import fetch_stock_dataframe
 from stock.maintenance import run_maintenance
@@ -11,7 +12,7 @@ from stock.schema import normalize_dataframe_columns
 def run_ingestion() -> None:
     df = fetch_stock_dataframe()
     df = normalize_dataframe_columns(df)
-    ts = datetime.now().astimezone().replace(microsecond=0).isoformat()
+    ts = datetime.now(ZoneInfo("America/Chicago")).replace(microsecond=0).isoformat()
     df = df.copy()
     df["snapshot_at"] = ts
     print("[stock] 快照时间 snapshot_at（写入 recorded_at）:", ts)
