@@ -310,13 +310,16 @@ def _latest_previous_frames(raw_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Data
             .sort_values(ts_col)
             .drop_duplicates(subset=["refresh_id"], keep="last")
         )
-        ids = ref["refresh_id"].tolist()
-        latest_id = ids[-1]
-        prev_id = ids[-2] if len(ids) >= 2 else None
+        ordered = ref.sort_values(ts_col, ascending=False).reset_index(drop=True)
+        latest_id = ordered.iloc[0]["refresh_id"]
+        latest_ts = ordered.iloc[0][ts_col]
         latest_df = work[work["refresh_id"] == latest_id].copy()
-        prev_df = work[work["refresh_id"] == prev_id].copy() if prev_id is not None else work.iloc[0:0].copy()
-        latest_ts = ref[ref["refresh_id"] == latest_id][ts_col].iloc[-1]
-        prev_ts = ref[ref["refresh_id"] == prev_id][ts_col].iloc[-1] if prev_id is not None else None
+        prev_df = work.iloc[0:0].copy()
+        prev_ts = None
+        if len(ordered) >= 2:
+            prev_id = ordered.iloc[1]["refresh_id"]
+            prev_df = work[work["refresh_id"] == prev_id].copy()
+            prev_ts = ordered.iloc[1][ts_col]
         return latest_df, prev_df, latest_ts, prev_ts
 
     snaps = sorted(work[ts_col].dropna().unique())

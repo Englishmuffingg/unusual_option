@@ -32,7 +32,7 @@ function normalizePayload(raw: any): DashboardResponse {
 }
 
 export async function fetchDashboard(table: 'stock' | 'etf'): Promise<DashboardResponse> {
-  const res = await fetch(`${API_BASE}/api/dashboard?table=${table}`)
+  const res = await fetch(`${API_BASE}/api/dashboard?table=${table}&_ts=${Date.now()}`, { cache: 'no-store' })
   if (!res.ok) {
     throw new Error(`API 请求失败: ${res.status}`)
   }

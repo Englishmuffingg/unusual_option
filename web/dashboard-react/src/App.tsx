@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { fetchDashboard } from './lib/api'
 import { DashboardResponse } from './lib/types'
 
@@ -62,6 +62,7 @@ type StrikeBucket = { label: string; min: number; max: number; volume: number }
 
 const CARD_CLASS = 'rounded-2xl border border-slate-200 bg-white p-4 shadow-sm'
 const ACTIVITY_TOP_N = 8
+const DASHBOARD_POLL_MS = 60_000
 
 const dteLabelMap: Record<DteFilter, string> = {
   all: '全部',
@@ -187,15 +188,53 @@ export default function App() {
     dir: 'desc',
   })
   const [page, setPage] = useState(1)
+  const fetchInFlightRef = useRef(false)
+
+  const loadDashboard = useCallback(
+    async (mode: 'initial' | 'background' = 'initial') => {
+      if (fetchInFlightRef.current) return
+      fetchInFlightRef.current = true
+      if (mode === 'initial') {
+        setLoading(true)
+      }
+      setError(null)
+      try {
+        const next = await fetchDashboard(source)
+        setData(next)
+      } catch (e) {
+        setError(String(e))
+      } finally {
+        fetchInFlightRef.current = false
+        if (mode === 'initial') {
+          setLoading(false)
+        }
+      }
+    },
+    [source],
+  )
 
   useEffect(() => {
-    setLoading(true)
-    setError(null)
-    fetchDashboard(source)
-      .then(setData)
-      .catch((e) => setError(String(e)))
-      .finally(() => setLoading(false))
-  }, [source])
+    void loadDashboard('initial')
+
+    const intervalId = window.setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        void loadDashboard('background')
+      }
+    }, DASHBOARD_POLL_MS)
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        void loadDashboard('background')
+      }
+    }
+
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    return () => {
+      window.clearInterval(intervalId)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+      fetchInFlightRef.current = false
+    }
+  }, [loadDashboard])
 
   const rows = useMemo(() => {
     const raw = (data?.sections?.overall?.contracts ?? []) as RawContract[]
