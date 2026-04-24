@@ -15,7 +15,7 @@ export type SummaryRow = {
 }
 
 export type SectionPayload = {
-  key: 'refreshed' | 'today_new' | 'overall' | 'inactive_helper'
+  key: 'refreshed' | 'today_new' | 'overall'
   summary: SummaryRow[]
   bubble: Array<{
     ticker: string
@@ -95,7 +95,6 @@ export type DashboardResponse = {
     current_total: number
     new_count: number
     continued_count: number
-    inactive_count: number
     put_ratio: number
     call_ratio: number
     dominant_ticker: string
@@ -105,9 +104,10 @@ export type DashboardResponse = {
   cards: Record<string, number | string>
   metric_explanations: string[]
   change_feed?: Array<Record<string, string | number | null>>
+  change_feed_preview?: Array<Record<string, string | number | null>>
+  intraday_event_rows?: Array<Record<string, string | number | null>>
   current_snapshot_rows?: Array<Record<string, string | number | null>>
   continued_rows?: Array<Record<string, string | number | null>>
-  inactive_rows?: Array<Record<string, string | number | null>>
   daily_summary?: Array<Record<string, string | number | null>>
   three_day_summary?: Array<Record<string, string | number | null>>
   refresh_delta: {
@@ -119,8 +119,6 @@ export type DashboardResponse = {
     estimated_premium_delta: number
     open_interest_delta: number
     new_contract_count: number
-    inactive_contract_count?: number
-    disappeared_contract_count: number
     persistent_contract_count: number
     ticker_rank: Array<{ ticker: string; premium_delta: number; volume_delta: number; open_interest_delta: number; contract_count_delta: number }>
     contract_changes: Array<Record<string, string | number>>
@@ -129,7 +127,6 @@ export type DashboardResponse = {
     refreshed: SectionPayload
     today_new: SectionPayload
     overall: SectionPayload
-    inactive_helper: SectionPayload
   }
   snapshot_meta?: {
     dashboard_generated_at?: string | null

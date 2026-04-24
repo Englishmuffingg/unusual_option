@@ -38,18 +38,6 @@ type RawContract = {
   status?: string
 }
 
-type RawInactiveContract = {
-  contract_signature?: string
-  ticker?: string
-  contract_symbol?: string
-  contract_display_name?: string
-  option_type?: string
-  expiration_date?: string
-  strike?: number
-  previous_options_volume?: number
-  previous_open_interest?: number
-}
-
 type ContractRow = {
   id: string
   snapshotTime: string
@@ -78,22 +66,10 @@ type ContractRow = {
   status: string
 }
 
-type InactiveRow = {
-  id: string
-  ticker: string
-  contractSymbol: string
-  contractDisplayName: string
-  optionType: 'Call' | 'Put'
-  expirationDate: string
-  strike: number
-  previousOptionsVolume: number
-  previousOpenInterest: number
-}
-
 type ChangeEventRow = {
   id: string
   eventTime: string
-  eventType: 'NEW' | 'UPDATE' | 'INACTIVE'
+  eventType: 'NEW' | 'UPDATE'
   ticker: string
   contractSignature: string
   contractSymbol: string
@@ -109,6 +85,10 @@ type ChangeEventRow = {
   currentOpenInterest: number | null
   deltaOpenInterest: number | null
   estimatedPremium: number | null
+  bidPrice: number | null
+  askPrice: number | null
+  midPrice: number | null
+  volOi: number | null
 }
 
 type SummaryTickerRow = {
@@ -117,7 +97,6 @@ type SummaryTickerRow = {
   windowEndTime: string
   totalNewCount: number
   totalUpdateCount: number
-  totalInactiveCount: number
   cumulativeDeltaVolume: number
   cumulativeDeltaOpenInterest: number
   cumulativeEstimatedPremium: number
@@ -192,24 +171,9 @@ function normalizeRow(raw: RawContract, idx: number): ContractRow {
   }
 }
 
-function normalizeInactiveRow(raw: RawInactiveContract, idx: number): InactiveRow {
-  const optionType = String(raw.option_type ?? '').toLowerCase().startsWith('p') ? 'Put' : 'Call'
-  return {
-    id: String(raw.contract_signature ?? raw.contract_symbol ?? `inactive-${idx}`),
-    ticker: String(raw.ticker ?? '-').toUpperCase(),
-    contractSymbol: String(raw.contract_symbol ?? '-'),
-    contractDisplayName: String(raw.contract_display_name ?? raw.contract_symbol ?? '-'),
-    optionType,
-    expirationDate: raw.expiration_date ? String(raw.expiration_date) : '-',
-    strike: toNumber(raw.strike),
-    previousOptionsVolume: toNumber(raw.previous_options_volume),
-    previousOpenInterest: toNumber(raw.previous_open_interest),
-  }
-}
-
 function normalizeChangeEventRow(raw: Record<string, unknown>, idx: number): ChangeEventRow {
   const optionType = String(raw.option_type ?? '').toLowerCase().startsWith('p') ? 'Put' : 'Call'
-  const eventType = String(raw.event_type ?? 'UPDATE').toUpperCase() as ChangeEventRow['eventType']
+  const eventType = (String(raw.event_type ?? 'UPDATE').toUpperCase() === 'NEW' ? 'NEW' : 'UPDATE') as ChangeEventRow['eventType']
   return {
     id: String(raw.contract_signature ?? raw.contract_symbol ?? `event-${idx}`) + `-${idx}`,
     eventTime: raw.event_time ? String(raw.event_time) : '-',
@@ -229,6 +193,10 @@ function normalizeChangeEventRow(raw: Record<string, unknown>, idx: number): Cha
     currentOpenInterest: raw.current_open_interest == null ? null : toNumber(raw.current_open_interest),
     deltaOpenInterest: raw.delta_open_interest == null ? null : toNumber(raw.delta_open_interest),
     estimatedPremium: raw.estimated_premium == null ? null : toNumber(raw.estimated_premium),
+    bidPrice: raw.bid_price == null ? null : toNumber(raw.bid_price),
+    askPrice: raw.ask_price == null ? null : toNumber(raw.ask_price),
+    midPrice: raw.mid_price == null ? null : toNumber(raw.mid_price),
+    volOi: raw.volume_to_open_interest_ratio == null ? null : toNumber(raw.volume_to_open_interest_ratio),
   }
 }
 
@@ -239,7 +207,6 @@ function normalizeSummaryTickerRow(raw: Record<string, unknown>): SummaryTickerR
     windowEndTime: raw.window_end_time ? String(raw.window_end_time) : '-',
     totalNewCount: toNumber(raw.total_new_count),
     totalUpdateCount: toNumber(raw.total_update_count),
-    totalInactiveCount: toNumber(raw.total_inactive_count),
     cumulativeDeltaVolume: toNumber(raw.cumulative_delta_volume),
     cumulativeDeltaOpenInterest: toNumber(raw.cumulative_delta_open_interest),
     cumulativeEstimatedPremium: toNumber(raw.cumulative_estimated_premium),
@@ -256,17 +223,36 @@ function formatCompact(n: number): string {
   return `${Math.round(n)}`
 }
 
-function formatShortDate(dateStr: string): string {
+function formatDisplayDateTime(value: string): string {
+  if (!value || value === '-') return '-'
+  const parsed = value.replace('T', ' ').replace(/([+-]\d{2}:\d{2}|Z)$/, '')
+  const match = parsed.match(/^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})/)
+  if (match) return `${match[1]} ${match[2]}`
+  const shortMatch = parsed.match(/^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2})/)
+  if (shortMatch) return `${shortMatch[1]} ${shortMatch[2]}:00`
+  return parsed
+}
+
+function formatDisplayDate(dateStr: string): string {
   if (!dateStr || dateStr === '-') return '-'
-  const parts = dateStr.split('-')
-  if (parts.length >= 3) return `${parts[1]}-${parts[2]}`
-  return dateStr
+  const cleaned = dateStr.replace('T', ' ').replace(/([+-]\d{2}:\d{2}|Z)$/, '')
+  const match = cleaned.match(/^(\d{4}-\d{2}-\d{2})/)
+  return match?.[1] ?? cleaned
 }
 
 function formatShortTime(ts: string): string {
   if (!ts || ts === '-') return '-'
-  const match = ts.match(/(\d{2}:\d{2})/)
+  const display = formatDisplayDateTime(ts)
+  const match = display.match(/(\d{2}:\d{2})/)
   return match?.[1] ?? ts
+}
+
+function formatShortDate(dateStr: string): string {
+  const display = formatDisplayDate(dateStr)
+  if (!display || display === '-') return '-'
+  const parts = display.split('-')
+  if (parts.length >= 3) return `${parts[1]}-${parts[2]}`
+  return display
 }
 
 function sortLabel(active: boolean, dir: 'asc' | 'desc'): string {
@@ -360,9 +346,8 @@ export default function App() {
   const [selectedStrikeRange, setSelectedStrikeRange] = useState<{ min: number; max: number } | null>(null)
   const [selectionSource, setSelectionSource] = useState<string | null>(null)
   const [tableMode, setTableMode] = useState<TableMode>('current')
-  const [eventTypeFilter, setEventTypeFilter] = useState<'all' | 'NEW' | 'UPDATE' | 'INACTIVE'>('all')
+  const [eventTypeFilter, setEventTypeFilter] = useState<'all' | 'NEW' | 'UPDATE'>('all')
   const [newExpanded, setNewExpanded] = useState(false)
-  const [inactiveExpanded, setInactiveExpanded] = useState(false)
   const [newSort, setNewSort] = useState<'volume' | 'vol_oi' | 'time'>('volume')
 
   const [tableSort, setTableSort] = useState<{ key: keyof ContractRow; dir: 'asc' | 'desc' }>({
@@ -438,13 +423,13 @@ export default function App() {
     return raw.map(normalizeRow)
   }, [data])
 
-  const inactiveRows = useMemo(() => {
-    const raw = (data?.sections?.inactive_helper?.contracts ?? []) as RawInactiveContract[]
-    return raw.map(normalizeInactiveRow)
-  }, [data])
-
   const changeFeedRows = useMemo(() => {
     const raw = (data?.change_feed ?? []) as Array<Record<string, unknown>>
+    return raw.map(normalizeChangeEventRow)
+  }, [data])
+
+  const intradayEventRows = useMemo(() => {
+    const raw = (data?.intraday_event_rows ?? []) as Array<Record<string, unknown>>
     return raw.map(normalizeChangeEventRow)
   }, [data])
 
@@ -548,7 +533,6 @@ export default function App() {
         currentTotal: summary.totalContracts,
         newCount: summary.newContracts,
         continuedCount: summary.continuingContracts,
-        inactiveCount: inactiveRows.length,
         putRatio: summary.putShare,
         callRatio: summary.callShare,
         dominantTicker: selectedTicker ?? '-',
@@ -560,14 +544,13 @@ export default function App() {
       currentTotal: toNumber(apiSummary.current_total),
       newCount: toNumber(apiSummary.new_count),
       continuedCount: toNumber(apiSummary.continued_count),
-      inactiveCount: toNumber(apiSummary.inactive_count),
       putRatio: toNumber(apiSummary.put_ratio),
       callRatio: toNumber(apiSummary.call_ratio),
       dominantTicker: String(apiSummary.dominant_ticker ?? '-'),
       dominantDteBucket: String(apiSummary.dominant_dte_bucket ?? '-'),
       dominantStrikeBucket: String(apiSummary.dominant_strike_bucket ?? '-'),
     }
-  }, [data, inactiveRows.length, selectedTicker, summary])
+  }, [data, selectedTicker, summary])
 
   const newRowsAll = useMemo(() => {
     const sorted = filteredRows.filter((r) => r.isNew)
@@ -604,8 +587,6 @@ export default function App() {
   const filteredChangeFeed = useMemo(() => {
     return changeFeedRows.filter((row) => {
       if (selectedTicker && row.ticker !== selectedTicker) return false
-      if (selectedContract && row.contractSymbol !== selectedContract) return false
-      if (eventTypeFilter === 'all' && row.eventType === 'INACTIVE') return false
       if (eventTypeFilter !== 'all' && row.eventType !== eventTypeFilter) return false
       if (optionFilter === 'call' && row.optionType !== 'Call') return false
       if (optionFilter === 'put' && row.optionType !== 'Put') return false
@@ -613,21 +594,19 @@ export default function App() {
       if (selectedStrikeRange && (row.strike < selectedStrikeRange.min || row.strike > selectedStrikeRange.max)) return false
       return true
     })
-  }, [changeFeedRows, selectedTicker, selectedContract, eventTypeFilter, optionFilter, dteFilter, selectedStrikeRange])
+  }, [changeFeedRows, selectedTicker, eventTypeFilter, optionFilter, dteFilter, selectedStrikeRange])
 
-  const hiddenInactiveEventCount = useMemo(() => {
-    if (eventTypeFilter !== 'all') return 0
-    return changeFeedRows.filter((row) => {
-      if (row.eventType !== 'INACTIVE') return false
+  const filteredIntradayEvents = useMemo(() => {
+    return intradayEventRows.filter((row) => {
       if (selectedTicker && row.ticker !== selectedTicker) return false
-      if (selectedContract && row.contractSymbol !== selectedContract) return false
       if (optionFilter === 'call' && row.optionType !== 'Call') return false
       if (optionFilter === 'put' && row.optionType !== 'Put') return false
       if (dteFilter !== 'all' && dteBucket(row.dte) !== dteFilter) return false
       if (selectedStrikeRange && (row.strike < selectedStrikeRange.min || row.strike > selectedStrikeRange.max)) return false
+      if (eventTypeFilter !== 'all' && row.eventType !== eventTypeFilter) return false
       return true
-    }).length
-  }, [changeFeedRows, eventTypeFilter, selectedTicker, selectedContract, optionFilter, dteFilter, selectedStrikeRange])
+    })
+  }, [intradayEventRows, selectedTicker, optionFilter, dteFilter, selectedStrikeRange, eventTypeFilter])
 
   const comparisonText = useMemo(() => {
     const latest = data?.snapshot_meta?.latest_snapshot_time
@@ -744,21 +723,21 @@ export default function App() {
     return copy
   }, [filteredSummaryRows, summarySort])
 
-  const eventTableRows = useMemo(() => filteredChangeFeed.slice(0, 200), [filteredChangeFeed])
+  const intradayTableRows = useMemo(() => filteredIntradayEvents, [filteredIntradayEvents])
 
   const pageSize = 20
   const totalTableRows =
     tableMode === 'current'
       ? sortedTableRows.length
       : tableMode === 'events'
-        ? eventTableRows.length
+        ? intradayTableRows.length
         : sortedSummaryRows.length
   const totalPages = Math.max(1, Math.ceil(totalTableRows / pageSize))
   const pagedRows =
     tableMode === 'current'
       ? sortedTableRows.slice((page - 1) * pageSize, page * pageSize)
       : tableMode === 'events'
-        ? eventTableRows.slice((page - 1) * pageSize, page * pageSize)
+        ? intradayTableRows.slice((page - 1) * pageSize, page * pageSize)
         : sortedSummaryRows.slice((page - 1) * pageSize, page * pageSize)
 
   useEffect(() => setPage(1), [filteredRows.length])
@@ -776,7 +755,6 @@ export default function App() {
     setTableMode('current')
     setEventTypeFilter('all')
     setNewExpanded(false)
-    setInactiveExpanded(false)
     setNewSort('volume')
     setSummaryWindowMode('three_day')
   }
@@ -901,7 +879,6 @@ export default function App() {
               <MetricCard label="当前异常合约总数" value={behaviorSummary.currentTotal} />
               <MetricCard label="本轮新增数" value={behaviorSummary.newCount} />
               <MetricCard label="本轮延续数" value={behaviorSummary.continuedCount} />
-              <MetricCard label="本轮不再异常数" value={behaviorSummary.inactiveCount} />
               <MetricCard label="Put 占比" value={`${(behaviorSummary.putRatio * 100).toFixed(1)}%`} />
               <MetricCard label="Call 占比" value={`${(behaviorSummary.callRatio * 100).toFixed(1)}%`} />
             </div>
@@ -943,7 +920,7 @@ export default function App() {
                 <Fact label="当前标的" value={selectedTicker ?? '全局视图'} />
                 <Fact label="平均 Vol/OI" value={summary.avgVolOi.toFixed(2)} />
                 <Fact label="最高 Vol/OI" value={summary.maxVolOi.toFixed(2)} />
-                <Fact label="最活跃到期日" value={summary.topExp} />
+                <Fact label="最活跃到期日" value={formatDisplayDate(summary.topExp)} />
                 <Fact label="最活跃 Strike" value={summary.topStrike ? String(summary.topStrike) : '-'} />
                 <Fact label="最集中的 DTE" value={dteLabelMap[summary.topDte]} />
               </div>
@@ -954,23 +931,21 @@ export default function App() {
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
               <div>
                 <h2 className="text-lg font-semibold">最近变化流</h2>
-                <p className="mt-1 text-xs text-slate-500">按时间倒序查看今日事件，默认聚焦 NEW / UPDATE；INACTIVE 仅作为辅助筛选。</p>
+                <p className="mt-1 text-xs text-slate-500">按时间倒序查看今日事件，默认聚焦 NEW / UPDATE。</p>
               </div>
               <div className="flex items-center gap-2 text-xs text-slate-500">
                 <label>
                   事件类型：
-                  <select value={eventTypeFilter} onChange={(e) => setEventTypeFilter(e.target.value as 'all' | 'NEW' | 'UPDATE' | 'INACTIVE')} className="ml-1 rounded border border-slate-300 px-2 py-1 text-xs text-slate-700">
+                  <select value={eventTypeFilter} onChange={(e) => setEventTypeFilter(e.target.value as 'all' | 'NEW' | 'UPDATE')} className="ml-1 rounded border border-slate-300 px-2 py-1 text-xs text-slate-700">
                     <option value="all">全部</option>
                     <option value="NEW">NEW</option>
                     <option value="UPDATE">UPDATE</option>
-                    <option value="INACTIVE">INACTIVE</option>
                   </select>
                 </label>
               </div>
             </div>
             <ChangeFeedPanel
               rows={filteredChangeFeed.slice(0, 12)}
-              hiddenInactiveCount={hiddenInactiveEventCount}
               onSelect={(row) => {
                 setSelectedTicker(row.ticker || null)
                 setSelectedContract(row.contractSymbol || null)
@@ -1164,30 +1139,20 @@ export default function App() {
             />
           </section>
 
-          <section className="rounded-2xl border border-slate-200 bg-slate-50 p-4 shadow-sm">
-            <div className="mb-3 flex items-center justify-between gap-2">
-              <div>
-                <h2 className="text-lg font-semibold text-slate-700">不再异常</h2>
-                <p className="mt-1 text-xs text-slate-500">
-                  这些合约相对于最近一次有效变化快照未继续被异常捕捉，不代表仓位已关闭。
-                </p>
-              </div>
-              <button
-                onClick={() => setInactiveExpanded((v) => !v)}
-                className="rounded-lg border border-slate-300 px-3 py-1 text-sm text-slate-600 hover:bg-white"
-              >
-                {inactiveExpanded ? '收起' : `展开查看（${inactiveRows.length}）`}
-              </button>
-            </div>
-            <InactiveActivityPanel rows={inactiveExpanded ? inactiveRows : inactiveRows.slice(0, 6)} />
-          </section>
-
           <section className={CARD_CLASS}>
             <div className="mb-3 flex items-center justify-between">
               <h2 className="text-lg font-semibold">明细验证表格</h2>
               <div className="text-right text-sm text-slate-500">
                 <div>共 {totalTableRows} 条</div>
-                {selectionSource ? <div>来源：{selectionSource}</div> : null}
+                <div>
+                  来源：
+                  {tableMode === 'current'
+                    ? '当前快照'
+                    : tableMode === 'events'
+                      ? '完整日内事件集'
+                      : '按 ticker 聚合汇总'}
+                  {selectionSource ? ` · 触发：${selectionSource}` : ''}
+                </div>
                 {tableMode === 'summary' ? <div>排序：{String(summarySort.key)} {summarySort.dir === 'asc' ? '升序' : '降序'}</div> : null}
               </div>
             </div>
@@ -1206,12 +1171,17 @@ export default function App() {
               <span className="rounded-full border border-slate-300 bg-slate-50 px-3 py-1 text-xs">{source.toUpperCase()}</span>
               {tableMode === 'events' && data?.metadata?.window_start_time ? (
                 <span className="rounded-full border border-slate-300 bg-slate-50 px-3 py-1 text-xs">
-                  日内窗口：{data.metadata.window_start_time} {'->'} {data.metadata.window_end_time ?? '-'}
+                  日内窗口：{formatDisplayDateTime(String(data.metadata.window_start_time))} {'->'} {formatDisplayDateTime(String(data.metadata.window_end_time ?? '-'))}
                 </span>
               ) : null}
               {tableMode === 'summary' && filteredSummaryRows[0] ? (
                 <span className="rounded-full border border-slate-300 bg-slate-50 px-3 py-1 text-xs">
-                  汇总窗口：{filteredSummaryRows[0].windowStartTime} {'->'} {filteredSummaryRows[0].windowEndTime}
+                  按 ticker 聚合 · 汇总窗口：{formatDisplayDateTime(filteredSummaryRows[0].windowStartTime)} {'->'} {formatDisplayDateTime(filteredSummaryRows[0].windowEndTime)}
+                </span>
+              ) : null}
+              {tableMode === 'summary' && selectedTicker ? (
+                <span className="rounded-full border border-slate-300 bg-slate-50 px-3 py-1 text-xs">
+                  已按标的筛选
                 </span>
               ) : null}
               {activeFilters.map((f) => (
@@ -1249,20 +1219,13 @@ export default function App() {
 
 function ChangeFeedPanel({
   rows,
-  hiddenInactiveCount,
   onSelect,
 }: {
   rows: ChangeEventRow[]
-  hiddenInactiveCount: number
   onSelect: (row: ChangeEventRow) => void
 }) {
   if (rows.length === 0) {
-    return (
-      <div className="text-sm text-slate-500">
-        最近没有可展示的变化事件。
-        {hiddenInactiveCount > 0 ? ` 当前有 ${hiddenInactiveCount} 条 INACTIVE 事件被默认隐藏，可切换筛选查看。` : ''}
-      </div>
-    )
+    return <div className="text-sm text-slate-500">最近没有可展示的变化事件。</div>
   }
   return (
     <div className="space-y-2">
@@ -1270,9 +1233,7 @@ function ChangeFeedPanel({
         const badgeCls =
           row.eventType === 'NEW'
             ? 'bg-rose-100 text-rose-700'
-            : row.eventType === 'UPDATE'
-              ? 'bg-amber-100 text-amber-700'
-              : 'bg-slate-200 text-slate-700'
+            : 'bg-amber-100 text-amber-700'
         return (
           <button key={row.id} onClick={() => onSelect(row)} className="block w-full rounded-xl border border-slate-200 p-3 text-left hover:bg-slate-50">
             <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1378,7 +1339,6 @@ function SummaryVisualPanel({
   if (rows.length === 0) return <div className="text-sm text-slate-500">{emptyText}</div>
   const totalNew = rows.reduce((sum, row) => sum + row.totalNewCount, 0)
   const totalUpdate = rows.reduce((sum, row) => sum + row.totalUpdateCount, 0)
-  const totalInactive = rows.reduce((sum, row) => sum + row.totalInactiveCount, 0)
   const weightedPut = rows.reduce((sum, row) => sum + row.putRatio * Math.max(row.eventCount, 1), 0)
   const weightedCall = rows.reduce((sum, row) => sum + row.callRatio * Math.max(row.eventCount, 1), 0)
   const totalWeight = rows.reduce((sum, row) => sum + Math.max(row.eventCount, 1), 0) || 1
@@ -1397,7 +1357,6 @@ function SummaryVisualPanel({
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <MetricCard label={`${titlePrefix} NEW 总数`} value={totalNew} />
         <MetricCard label={`${titlePrefix} UPDATE 总数`} value={totalUpdate} />
-        <MetricCard label={`${titlePrefix} INACTIVE 总数`} value={totalInactive} />
         <MetricCard label={`${titlePrefix} Put / Call`} value={`${(summaryPutRatio * 100).toFixed(0)}% / ${(summaryCallRatio * 100).toFixed(0)}%`} />
       </div>
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
@@ -1435,7 +1394,6 @@ function SummaryVisualPanel({
           rows={[
             { label: 'NEW', value: totalNew, color: 'bg-rose-500' },
             { label: 'UPDATE', value: totalUpdate, color: 'bg-amber-500' },
-            { label: 'INACTIVE', value: totalInactive, color: 'bg-slate-400' },
           ]}
         />
         <SummaryMixCard
@@ -1456,7 +1414,6 @@ function SummaryVisualPanel({
               <div className="mt-1 flex flex-wrap gap-3 text-xs text-slate-500">
                 <span>NEW {row.totalNewCount}</span>
                 <span>UPDATE {row.totalUpdateCount}</span>
-                <span>INACTIVE {row.totalInactiveCount}</span>
                 <span>Put/Call {(row.putRatio * 100).toFixed(0)}% / {(row.callRatio * 100).toFixed(0)}%</span>
               </div>
             </div>
@@ -1613,6 +1570,9 @@ function CurrentTable({ rows, onSortHeader, selectedContract }: { rows: Contract
             ['openInterest', 'current_oi'],
             ['deltaOpenInterest', 'delta_oi'],
             ['estimatedPremium', 'estimated_premium'],
+            ['bidPrice', 'bid_price'],
+            ['askPrice', 'ask_price'],
+            ['midPrice', 'mid_price'],
             ['volOi', 'vol_oi_ratio'],
             ['status', 'status'],
           ].map(([key, label]) => (
@@ -1623,11 +1583,11 @@ function CurrentTable({ rows, onSortHeader, selectedContract }: { rows: Contract
       <tbody>
         {rows.map((r) => (
           <tr key={r.id} className={`border-b border-slate-100 hover:bg-sky-50 ${selectedContract === r.contractSymbol ? 'bg-amber-50' : ''}`}>
-            <td className="px-2 py-1">{r.snapshotTime}</td>
+            <td className="px-2 py-1">{formatDisplayDateTime(r.snapshotTime)}</td>
             <td className="px-2 py-1">{r.ticker}</td>
             <td className="px-2 py-1">{r.contractDisplayName}</td>
             <td className="px-2 py-1">{r.optionType}</td>
-            <td className="px-2 py-1">{r.expirationDate}</td>
+            <td className="px-2 py-1">{formatDisplayDate(r.expirationDate)}</td>
             <td className="px-2 py-1">{r.strike}</td>
             <td className="px-2 py-1">{r.dte}</td>
             <td className="px-2 py-1">{r.previousOptionsVolume == null ? '—' : formatCompact(r.previousOptionsVolume)}</td>
@@ -1637,6 +1597,9 @@ function CurrentTable({ rows, onSortHeader, selectedContract }: { rows: Contract
             <td className="px-2 py-1">{formatCompact(r.openInterest)}</td>
             <td className="px-2 py-1">{r.deltaOpenInterest == null ? 'N/A' : `${r.deltaOpenInterest >= 0 ? '+' : '-'}${formatCompact(Math.abs(r.deltaOpenInterest))}`}</td>
             <td className="px-2 py-1">{formatCompact(r.estimatedPremium)}</td>
+            <td className="px-2 py-1">{r.bidPrice.toFixed(2)}</td>
+            <td className="px-2 py-1">{r.askPrice.toFixed(2)}</td>
+            <td className="px-2 py-1">{r.midPrice.toFixed(2)}</td>
             <td className="px-2 py-1">{r.volOi.toFixed(2)}</td>
             <td className="px-2 py-1">{r.status}</td>
           </tr>
@@ -1651,7 +1614,7 @@ function EventTable({ rows, selectedContract }: { rows: ChangeEventRow[]; select
     <table className="min-w-full text-xs">
       <thead className="sticky top-0 bg-slate-100">
         <tr>
-          {['event_time', 'event_type', 'ticker', 'contract_display_name', 'option_type', 'expiration_date', 'strike', 'previous_vol', 'current_vol', 'delta_vol', 'previous_oi', 'current_oi', 'delta_oi'].map((label) => (
+          {['event_time', 'event_type', 'ticker', 'contract_display_name', 'option_type', 'expiration_date', 'strike', 'previous_vol', 'current_vol', 'delta_vol', 'previous_oi', 'current_oi', 'delta_oi', 'estimated_premium', 'bid_price', 'ask_price', 'mid_price', 'vol_oi_ratio'].map((label) => (
             <th key={label} className="border-b border-slate-200 px-2 py-2 text-left font-semibold">{label}</th>
           ))}
         </tr>
@@ -1659,12 +1622,12 @@ function EventTable({ rows, selectedContract }: { rows: ChangeEventRow[]; select
       <tbody>
         {rows.map((r) => (
           <tr key={r.id} className={`border-b border-slate-100 ${selectedContract === r.contractSymbol ? 'bg-amber-50' : ''}`}>
-            <td className="px-2 py-1">{r.eventTime}</td>
+            <td className="px-2 py-1">{formatDisplayDateTime(r.eventTime)}</td>
             <td className="px-2 py-1">{r.eventType}</td>
             <td className="px-2 py-1">{r.ticker}</td>
             <td className="px-2 py-1">{r.contractDisplayName}</td>
             <td className="px-2 py-1">{r.optionType}</td>
-            <td className="px-2 py-1">{r.expirationDate}</td>
+            <td className="px-2 py-1">{formatDisplayDate(r.expirationDate)}</td>
             <td className="px-2 py-1">{r.strike}</td>
             <td className="px-2 py-1">{r.previousOptionsVolume == null ? '--' : formatCompact(r.previousOptionsVolume)}</td>
             <td className="px-2 py-1">{r.currentOptionsVolume == null ? '--' : formatCompact(r.currentOptionsVolume)}</td>
@@ -1672,6 +1635,11 @@ function EventTable({ rows, selectedContract }: { rows: ChangeEventRow[]; select
             <td className="px-2 py-1">{r.previousOpenInterest == null ? '--' : formatCompact(r.previousOpenInterest)}</td>
             <td className="px-2 py-1">{r.currentOpenInterest == null ? '--' : formatCompact(r.currentOpenInterest)}</td>
             <td className="px-2 py-1">{r.deltaOpenInterest == null ? '--' : `${r.deltaOpenInterest >= 0 ? '+' : '-'}${formatCompact(Math.abs(r.deltaOpenInterest))}`}</td>
+            <td className="px-2 py-1">{r.estimatedPremium == null ? '--' : formatCompact(r.estimatedPremium)}</td>
+            <td className="px-2 py-1">{r.bidPrice == null ? '--' : r.bidPrice.toFixed(2)}</td>
+            <td className="px-2 py-1">{r.askPrice == null ? '--' : r.askPrice.toFixed(2)}</td>
+            <td className="px-2 py-1">{r.midPrice == null ? '--' : r.midPrice.toFixed(2)}</td>
+            <td className="px-2 py-1">{r.volOi == null ? '--' : r.volOi.toFixed(2)}</td>
           </tr>
         ))}
       </tbody>
@@ -1699,7 +1667,6 @@ function SummaryTable({
             ['lastEventTime', 'last_event_time'],
             ['totalNewCount', 'total_new_count'],
             ['totalUpdateCount', 'total_update_count'],
-            ['totalInactiveCount', 'total_inactive_count'],
             ['cumulativeDeltaVolume', 'cumulative_delta_volume'],
             ['cumulativeDeltaOpenInterest', 'cumulative_delta_open_interest'],
             ['putRatio', 'put_ratio'],
@@ -1716,12 +1683,11 @@ function SummaryTable({
         {rows.map((r) => (
           <tr key={`${r.ticker}-${r.lastEventTime}`} className="border-b border-slate-100">
             <td className="px-2 py-1">{r.ticker}</td>
-            <td className="px-2 py-1">{r.windowStartTime}</td>
-            <td className="px-2 py-1">{r.windowEndTime}</td>
-            <td className="px-2 py-1">{r.lastEventTime}</td>
+            <td className="px-2 py-1">{formatDisplayDateTime(r.windowStartTime)}</td>
+            <td className="px-2 py-1">{formatDisplayDateTime(r.windowEndTime)}</td>
+            <td className="px-2 py-1">{formatDisplayDateTime(r.lastEventTime)}</td>
             <td className="px-2 py-1">{r.totalNewCount}</td>
             <td className="px-2 py-1">{r.totalUpdateCount}</td>
-            <td className="px-2 py-1">{r.totalInactiveCount}</td>
             <td className="px-2 py-1">{r.cumulativeDeltaVolume >= 0 ? '+' : '-'}{formatCompact(Math.abs(r.cumulativeDeltaVolume))}</td>
             <td className="px-2 py-1">{r.cumulativeDeltaOpenInterest >= 0 ? '+' : '-'}{formatCompact(Math.abs(r.cumulativeDeltaOpenInterest))}</td>
             <td className="px-2 py-1">{(r.putRatio * 100).toFixed(0)}%</td>
@@ -1847,33 +1813,3 @@ function ContinuingActivityPanel({ rows, onSelect, selected }: { rows: ContractR
     )
   )
 }
-
-function InactiveActivityPanel({ rows }: { rows: InactiveRow[] }) {
-  return rows.length === 0 ? (
-    <div className="text-sm text-slate-500">当前没有“不再异常”的合约。</div>
-  ) : (
-    <div className="space-y-2">
-      {rows.map((r) => (
-        <div key={r.id} className="rounded-xl border border-slate-200 bg-white px-3 py-3 text-left">
-          <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
-            <div className="flex items-center gap-2">
-              <span className="font-semibold text-slate-700">{r.contractDisplayName}</span>
-              <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${r.optionType === 'Put' ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700'}`}>
-                {r.optionType}
-              </span>
-              <span className="text-xs text-slate-500">{formatShortDate(r.expirationDate)}</span>
-            </div>
-            <div className="text-xs text-slate-500">{r.ticker}</div>
-          </div>
-          <div className="mt-2 flex flex-wrap gap-3 text-xs text-slate-500">
-            <span>Strike {r.strike}</span>
-            <span>此前 Vol {formatCompact(r.previousOptionsVolume)}</span>
-            <span>此前 OI {formatCompact(r.previousOpenInterest)}</span>
-          </div>
-        </div>
-      ))}
-    </div>
-  )
-}
-
-
