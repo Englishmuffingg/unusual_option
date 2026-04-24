@@ -10,6 +10,7 @@ type TickerSort = 'new_volume' | 'total_volume' | 'vol_oi' | 'alphabet'
 
 type RawContract = {
   id?: number
+  snapshot_time?: string
   recorded_at?: string
   is_new?: number | boolean
   is_refreshed?: number | boolean
@@ -31,6 +32,10 @@ type RawContract = {
   previous_open_interest?: number
   delta_volume?: number
   delta_open_interest?: number
+  current_options_volume?: number
+  current_open_interest?: number
+  estimated_premium?: number
+  status?: string
 }
 
 type RawInactiveContract = {
@@ -47,6 +52,7 @@ type RawInactiveContract = {
 
 type ContractRow = {
   id: string
+  snapshotTime: string
   recordedAt: string
   isNew: boolean
   isRefreshed: boolean
@@ -68,6 +74,8 @@ type ContractRow = {
   previousOpenInterest: number | null
   deltaVolume: number | null
   deltaOpenInterest: number | null
+  estimatedPremium: number
+  status: string
 }
 
 type InactiveRow = {
@@ -105,17 +113,33 @@ type ChangeEventRow = {
 
 type SummaryTickerRow = {
   ticker: string
+  windowStartTime: string
+  windowEndTime: string
   totalNewCount: number
   totalUpdateCount: number
   totalInactiveCount: number
   cumulativeDeltaVolume: number
   cumulativeDeltaOpenInterest: number
   cumulativeEstimatedPremium: number
+  putRatio: number
+  callRatio: number
   eventCount: number
   lastEventTime: string
 }
 
-type TableMode = 'current' | 'events' | 'daily_summary'
+type CurrentOverview = {
+  activeContractCount: number
+  activeTickerCount: number
+  topTicker: string
+  putRatio: number
+  callRatio: number
+  dteDistribution: Array<{ label: string; value: number }>
+  tickerVolumeTop: Array<{ ticker: string; totalVolume: number; rows: number }>
+  topActiveContracts: ContractRow[]
+}
+
+type TableMode = 'current' | 'events' | 'summary'
+type SummaryWindowMode = 'daily' | 'three_day'
 
 type StrikeBucket = { label: string; min: number; max: number; volume: number }
 
@@ -141,6 +165,7 @@ function normalizeRow(raw: RawContract, idx: number): ContractRow {
   const optionType = String(raw.option_type ?? '').toLowerCase().startsWith('p') ? 'Put' : 'Call'
   return {
     id: String(raw.id ?? `${raw.contract_symbol ?? 'na'}-${idx}`),
+    snapshotTime: raw.snapshot_time ? String(raw.snapshot_time) : '-',
     recordedAt: raw.recorded_at ? String(raw.recorded_at) : '-',
     isNew: Boolean(raw.is_new),
     isRefreshed: Boolean(raw.is_refreshed),
@@ -162,6 +187,8 @@ function normalizeRow(raw: RawContract, idx: number): ContractRow {
     previousOpenInterest: raw.previous_open_interest == null ? null : toNumber(raw.previous_open_interest),
     deltaVolume: raw.delta_volume == null ? null : toNumber(raw.delta_volume),
     deltaOpenInterest: raw.delta_open_interest == null ? null : toNumber(raw.delta_open_interest),
+    estimatedPremium: toNumber(raw.estimated_premium),
+    status: String(raw.status ?? (raw.is_new ? 'new' : raw.is_refreshed ? 'continued' : 'active')),
   }
 }
 
@@ -208,12 +235,16 @@ function normalizeChangeEventRow(raw: Record<string, unknown>, idx: number): Cha
 function normalizeSummaryTickerRow(raw: Record<string, unknown>): SummaryTickerRow {
   return {
     ticker: String(raw.ticker ?? '-').toUpperCase(),
+    windowStartTime: raw.window_start_time ? String(raw.window_start_time) : '-',
+    windowEndTime: raw.window_end_time ? String(raw.window_end_time) : '-',
     totalNewCount: toNumber(raw.total_new_count),
     totalUpdateCount: toNumber(raw.total_update_count),
     totalInactiveCount: toNumber(raw.total_inactive_count),
     cumulativeDeltaVolume: toNumber(raw.cumulative_delta_volume),
     cumulativeDeltaOpenInterest: toNumber(raw.cumulative_delta_open_interest),
     cumulativeEstimatedPremium: toNumber(raw.cumulative_estimated_premium),
+    putRatio: toNumber(raw.put_ratio),
+    callRatio: toNumber(raw.call_ratio),
     eventCount: toNumber(raw.event_count),
     lastEventTime: raw.last_event_time ? String(raw.last_event_time) : '-',
   }
@@ -236,6 +267,11 @@ function formatShortTime(ts: string): string {
   if (!ts || ts === '-') return '-'
   const match = ts.match(/(\d{2}:\d{2})/)
   return match?.[1] ?? ts
+}
+
+function sortLabel(active: boolean, dir: 'asc' | 'desc'): string {
+  if (!active) return ' ↕'
+  return dir === 'asc' ? ' ↑' : ' ↓'
 }
 
 function dteBucket(dte: number): DteFilter {
@@ -278,6 +314,36 @@ function strikeBuckets(rows: ContractRow[]): StrikeBucket[] {
   return bins.filter((b) => b.volume > 0)
 }
 
+function normalizeOverview(raw: DashboardResponse | null): CurrentOverview {
+  const overview = raw?.current_overview
+  const dteDistribution = Array.isArray(overview?.dte_distribution)
+    ? overview!.dte_distribution.map((row) => ({
+        label: String((row.dte_bucket as string | undefined) ?? '-'),
+        value: toNumber(row.total_volume),
+      }))
+    : []
+  const tickerVolumeTop = Array.isArray(overview?.ticker_volume_top)
+    ? overview!.ticker_volume_top.map((row) => ({
+        ticker: String((row.ticker as string | undefined) ?? '-').toUpperCase(),
+        totalVolume: toNumber(row.total_volume),
+        rows: toNumber(row.rows),
+      }))
+    : []
+  const topActiveContracts = Array.isArray(overview?.top_active_contracts)
+    ? overview!.top_active_contracts.map((row, idx) => normalizeRow(row as RawContract, idx))
+    : []
+  return {
+    activeContractCount: toNumber(overview?.active_contract_count),
+    activeTickerCount: toNumber(overview?.active_ticker_count),
+    topTicker: String(overview?.top_ticker ?? '-'),
+    putRatio: toNumber(overview?.put_ratio),
+    callRatio: toNumber(overview?.call_ratio),
+    dteDistribution,
+    tickerVolumeTop,
+    topActiveContracts,
+  }
+}
+
 export default function App() {
   const [source, setSource] = useState<SourceType>('etf')
   const [data, setData] = useState<DashboardResponse | null>(null)
@@ -301,6 +367,11 @@ export default function App() {
 
   const [tableSort, setTableSort] = useState<{ key: keyof ContractRow; dir: 'asc' | 'desc' }>({
     key: 'optionsVolume',
+    dir: 'desc',
+  })
+  const [summaryWindowMode, setSummaryWindowMode] = useState<SummaryWindowMode>('three_day')
+  const [summarySort, setSummarySort] = useState<{ key: keyof SummaryTickerRow; dir: 'asc' | 'desc' }>({
+    key: 'eventCount',
     dir: 'desc',
   })
   const [page, setPage] = useState(1)
@@ -357,6 +428,16 @@ export default function App() {
     return raw.map(normalizeRow)
   }, [data])
 
+  const currentSnapshotDataRows = useMemo(() => {
+    const raw = (data?.current_snapshot_rows ?? []) as RawContract[]
+    return raw.map(normalizeRow)
+  }, [data])
+
+  const continuedDataRows = useMemo(() => {
+    const raw = (data?.continued_rows ?? []) as RawContract[]
+    return raw.map(normalizeRow)
+  }, [data])
+
   const inactiveRows = useMemo(() => {
     const raw = (data?.sections?.inactive_helper?.contracts ?? []) as RawInactiveContract[]
     return raw.map(normalizeInactiveRow)
@@ -376,6 +457,8 @@ export default function App() {
     const raw = (data?.three_day_summary ?? []) as Array<Record<string, unknown>>
     return raw.map(normalizeSummaryTickerRow)
   }, [data])
+
+  const currentOverview = useMemo(() => normalizeOverview(data), [data])
 
   const filteredRows = useMemo(() => {
     return rows.filter((row) => {
@@ -495,22 +578,34 @@ export default function App() {
   const newRows = useMemo(() => (newExpanded ? newRowsAll : newRowsAll.slice(0, ACTIVITY_TOP_N)), [newExpanded, newRowsAll])
   const continuingRows = useMemo(
     () =>
-      filteredRows
-        .filter((r) => r.isRefreshed)
-        .sort((a, b) => b.optionsVolume - a.optionsVolume)
+      continuedDataRows
+        .filter((r) => {
+          if (selectedTicker && r.ticker !== selectedTicker) return false
+          if (optionFilter === 'call' && r.optionType !== 'Call') return false
+          if (optionFilter === 'put' && r.optionType !== 'Put') return false
+          if (dteFilter !== 'all' && dteBucket(r.dte) !== dteFilter) return false
+          if (selectedStrikeRange && (r.strike < selectedStrikeRange.min || r.strike > selectedStrikeRange.max)) return false
+          return true
+        })
+        .sort((a, b) => {
+          const deltaA = Math.abs(a.deltaVolume ?? 0) + Math.abs(a.deltaOpenInterest ?? 0)
+          const deltaB = Math.abs(b.deltaVolume ?? 0) + Math.abs(b.deltaOpenInterest ?? 0)
+          return deltaB - deltaA
+        })
         .slice(0, ACTIVITY_TOP_N),
-    [filteredRows],
+    [continuedDataRows, selectedTicker, optionFilter, dteFilter, selectedStrikeRange],
   )
 
   const currentSnapshotRows = useMemo(
-    () => filteredRows.slice().sort((a, b) => b.optionsVolume - a.optionsVolume).slice(0, ACTIVITY_TOP_N),
-    [filteredRows],
+    () => (currentOverview.topActiveContracts.length ? currentOverview.topActiveContracts : currentSnapshotDataRows).slice(0, ACTIVITY_TOP_N),
+    [currentOverview, currentSnapshotDataRows],
   )
 
   const filteredChangeFeed = useMemo(() => {
     return changeFeedRows.filter((row) => {
       if (selectedTicker && row.ticker !== selectedTicker) return false
       if (selectedContract && row.contractSymbol !== selectedContract) return false
+      if (eventTypeFilter === 'all' && row.eventType === 'INACTIVE') return false
       if (eventTypeFilter !== 'all' && row.eventType !== eventTypeFilter) return false
       if (optionFilter === 'call' && row.optionType !== 'Call') return false
       if (optionFilter === 'put' && row.optionType !== 'Put') return false
@@ -520,12 +615,49 @@ export default function App() {
     })
   }, [changeFeedRows, selectedTicker, selectedContract, eventTypeFilter, optionFilter, dteFilter, selectedStrikeRange])
 
+  const hiddenInactiveEventCount = useMemo(() => {
+    if (eventTypeFilter !== 'all') return 0
+    return changeFeedRows.filter((row) => {
+      if (row.eventType !== 'INACTIVE') return false
+      if (selectedTicker && row.ticker !== selectedTicker) return false
+      if (selectedContract && row.contractSymbol !== selectedContract) return false
+      if (optionFilter === 'call' && row.optionType !== 'Call') return false
+      if (optionFilter === 'put' && row.optionType !== 'Put') return false
+      if (dteFilter !== 'all' && dteBucket(row.dte) !== dteFilter) return false
+      if (selectedStrikeRange && (row.strike < selectedStrikeRange.min || row.strike > selectedStrikeRange.max)) return false
+      return true
+    }).length
+  }, [changeFeedRows, eventTypeFilter, selectedTicker, selectedContract, optionFilter, dteFilter, selectedStrikeRange])
+
   const comparisonText = useMemo(() => {
     const latest = data?.snapshot_meta?.latest_snapshot_time
     const previous = data?.snapshot_meta?.previous_snapshot_time
     if (!latest) return '当前基准：最近一次有效变化快照'
     if (!previous) return `当前基准：最新快照 ${formatShortTime(String(latest))}，此前暂无有效变化快照`
     return `当前基准：${formatShortTime(String(previous))} -> ${formatShortTime(String(latest))}（最近一次有效变化快照）`
+  }, [data])
+
+  const dashboardMetaText = useMemo(() => {
+    const generatedAt = data?.metadata?.dashboard_generated_at ?? data?.dashboard_generated_at
+    const snapshotTime = data?.metadata?.snapshot_time ?? data?.snapshot_meta?.snapshot_time
+    return `快照时点：${snapshotTime ? formatShortTime(String(snapshotTime)) : '-'} · 生成时间：${generatedAt ? formatShortTime(String(generatedAt)) : '-'}`
+  }, [data])
+
+  const cacheStatusSummary = useMemo(() => {
+    const status = String(data?.metadata?.cache_refresh_status ?? data?.snapshot_meta?.cache_refresh_status ?? 'unknown')
+    const artifactKey = String(data?.metadata?.artifact_key ?? data?.artifact_key ?? '-')
+    const rawRefreshId = String(data?.metadata?.raw_refresh_id ?? data?.snapshot_meta?.raw_refresh_id ?? '-')
+    const currentRefreshId = String(data?.metadata?.current_refresh_id ?? data?.snapshot_meta?.current_refresh_id ?? '-')
+    const cacheGeneratedAt = data?.metadata?.cache_generated_at ?? data?.snapshot_meta?.cache_generated_at ?? data?.dashboard_generated_at ?? null
+    const lastError = data?.metadata?.cache_last_error ?? data?.snapshot_meta?.cache_last_error ?? null
+    return {
+      status,
+      artifactKey,
+      rawRefreshId,
+      currentRefreshId,
+      cacheGeneratedAt: cacheGeneratedAt ? String(cacheGeneratedAt) : '-',
+      lastError: lastError ? String(lastError) : null,
+    }
   }, [data])
 
   const dteChartData = useMemo(() => {
@@ -590,9 +722,27 @@ export default function App() {
     return copy
   }, [filteredRows, tableSort])
 
-  const filteredDailySummaryRows = useMemo(() => {
-    return dailySummaryRows.filter((row) => !selectedTicker || row.ticker === selectedTicker)
-  }, [dailySummaryRows, selectedTicker])
+  const summarySourceRows = useMemo(
+    () => (summaryWindowMode === 'daily' ? dailySummaryRows : threeDaySummaryRows),
+    [summaryWindowMode, dailySummaryRows, threeDaySummaryRows],
+  )
+
+  const filteredSummaryRows = useMemo(() => {
+    return summarySourceRows.filter((row) => !selectedTicker || row.ticker === selectedTicker)
+  }, [summarySourceRows, selectedTicker])
+
+  const sortedSummaryRows = useMemo(() => {
+    const copy = [...filteredSummaryRows]
+    copy.sort((a, b) => {
+      const va = a[summarySort.key]
+      const vb = b[summarySort.key]
+      if (typeof va === 'number' && typeof vb === 'number') {
+        return summarySort.dir === 'asc' ? va - vb : vb - va
+      }
+      return summarySort.dir === 'asc' ? String(va).localeCompare(String(vb)) : String(vb).localeCompare(String(va))
+    })
+    return copy
+  }, [filteredSummaryRows, summarySort])
 
   const eventTableRows = useMemo(() => filteredChangeFeed.slice(0, 200), [filteredChangeFeed])
 
@@ -602,14 +752,14 @@ export default function App() {
       ? sortedTableRows.length
       : tableMode === 'events'
         ? eventTableRows.length
-        : filteredDailySummaryRows.length
+        : sortedSummaryRows.length
   const totalPages = Math.max(1, Math.ceil(totalTableRows / pageSize))
   const pagedRows =
     tableMode === 'current'
       ? sortedTableRows.slice((page - 1) * pageSize, page * pageSize)
       : tableMode === 'events'
         ? eventTableRows.slice((page - 1) * pageSize, page * pageSize)
-        : filteredDailySummaryRows.slice((page - 1) * pageSize, page * pageSize)
+        : sortedSummaryRows.slice((page - 1) * pageSize, page * pageSize)
 
   useEffect(() => setPage(1), [filteredRows.length])
 
@@ -628,10 +778,15 @@ export default function App() {
     setNewExpanded(false)
     setInactiveExpanded(false)
     setNewSort('volume')
+    setSummaryWindowMode('three_day')
   }
 
   const onSortHeader = (key: keyof ContractRow) => {
     setTableSort((prev) => ({ key, dir: prev.key === key && prev.dir === 'desc' ? 'asc' : 'desc' }))
+  }
+
+  const onSummarySortHeader = (key: keyof SummaryTickerRow) => {
+    setSummarySort((prev) => ({ key, dir: prev.key === key && prev.dir === 'desc' ? 'asc' : 'desc' }))
   }
 
   return (
@@ -645,6 +800,30 @@ export default function App() {
           <span className="rounded-full border border-slate-300 bg-slate-50 px-3 py-1">
             auto refresh: {Math.round(DASHBOARD_POLL_MS / 1000)}s
           </span>
+          <span
+            className={`rounded-full border px-3 py-1 ${
+              cacheStatusSummary.status === 'success'
+                ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                : cacheStatusSummary.status === 'failed'
+                  ? 'border-rose-200 bg-rose-50 text-rose-700'
+                  : 'border-slate-300 bg-slate-50 text-slate-600'
+            }`}
+          >
+            cache: {cacheStatusSummary.status}
+          </span>
+        </div>
+        <div className="mt-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-600">
+          <div className="flex flex-wrap gap-x-4 gap-y-1">
+            <span>artifact: {cacheStatusSummary.artifactKey}</span>
+            <span>raw refresh: {cacheStatusSummary.rawRefreshId}</span>
+            <span>current refresh: {cacheStatusSummary.currentRefreshId}</span>
+            <span>cache generated: {formatShortTime(cacheStatusSummary.cacheGeneratedAt)}</span>
+          </div>
+          {cacheStatusSummary.lastError ? (
+            <div className="mt-2 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-rose-700">
+              cache refresh error: {cacheStatusSummary.lastError}
+            </div>
+          ) : null}
         </div>
         <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-6">
           <div className="lg:col-span-1">
@@ -717,6 +896,7 @@ export default function App() {
           <section className={CARD_CLASS}>
             <h2 className="mb-3 text-lg font-semibold">全局概览</h2>
             <p className="mb-3 text-xs text-slate-500">{comparisonText}</p>
+            <p className="mb-3 text-xs text-slate-400">{dashboardMetaText}</p>
             <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
               <MetricCard label="当前异常合约总数" value={behaviorSummary.currentTotal} />
               <MetricCard label="本轮新增数" value={behaviorSummary.newCount} />
@@ -774,7 +954,7 @@ export default function App() {
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
               <div>
                 <h2 className="text-lg font-semibold">最近变化流</h2>
-                <p className="mt-1 text-xs text-slate-500">按时间倒序查看 NEW / UPDATE / INACTIVE 事件，点击后会联动下方明细表。</p>
+                <p className="mt-1 text-xs text-slate-500">按时间倒序查看今日事件，默认聚焦 NEW / UPDATE；INACTIVE 仅作为辅助筛选。</p>
               </div>
               <div className="flex items-center gap-2 text-xs text-slate-500">
                 <label>
@@ -790,6 +970,7 @@ export default function App() {
             </div>
             <ChangeFeedPanel
               rows={filteredChangeFeed.slice(0, 12)}
+              hiddenInactiveCount={hiddenInactiveEventCount}
               onSelect={(row) => {
                 setSelectedTicker(row.ticker || null)
                 setSelectedContract(row.contractSymbol || null)
@@ -802,18 +983,19 @@ export default function App() {
           <section className={CARD_CLASS}>
             <div className="mb-3 flex items-center justify-between">
               <div>
-                <h2 className="text-lg font-semibold">当前异常快照</h2>
-                <p className="mt-1 text-xs text-slate-500">当前仍在盘面上的 active contracts，帮助快速理解“现在还有什么异常”。</p>
+                <h2 className="text-lg font-semibold">当前盘面概览</h2>
+                <p className="mt-1 text-xs text-slate-500">当前 active contracts 的概览视图，强调盘面结构、主要标的和少量最强合约。</p>
               </div>
             </div>
-            <CurrentSnapshotPanel
+            <CurrentOverviewPanel
+              overview={currentOverview}
               rows={currentSnapshotRows}
+              selected={selectedContract}
               onSelect={(contract) => {
                 setSelectedContract(contract)
-                setSelectionSource(contract ? '当前异常快照' : null)
+                setSelectionSource(contract ? '当前盘面概览' : null)
                 setTableMode('current')
               }}
-              selected={selectedContract}
             />
           </section>
 
@@ -939,35 +1121,39 @@ export default function App() {
 
           <section className={CARD_CLASS}>
             <h2 className="mb-3 text-lg font-semibold">日内 Summary</h2>
-            <p className="mb-3 text-xs text-slate-500">帮助判断今天的情绪主线，聚合最近变化流中的日内 NEW / UPDATE / INACTIVE 事件。</p>
-            <SummaryTickerPanel
+            <p className="mb-3 text-xs text-slate-500">帮助判断今天窗口内的情绪主线，图形默认覆盖主要标的，而不是仅依赖 focus tickers。</p>
+            <SummaryVisualPanel
               rows={dailySummaryRows.slice(0, 8)}
+              titlePrefix="日内"
               emptyText="今日暂无变化事件汇总。"
               onSelectTicker={(ticker) => {
                 setSelectedTicker(ticker)
                 setSelectionSource('日内 Summary')
-                setTableMode('daily_summary')
+                setSummaryWindowMode('daily')
+                setTableMode('summary')
               }}
             />
           </section>
 
           <section className={CARD_CLASS}>
             <h2 className="mb-3 text-lg font-semibold">近三日 Summary</h2>
-            <p className="mb-3 text-xs text-slate-500">用于区分一次性脉冲和持续主题，观察近三日反复出现的 ticker 与持续变化主线。</p>
-            <SummaryTickerPanel
+            <p className="mb-3 text-xs text-slate-500">用于区分一次性脉冲和持续主题，图形直接展示近三日的累计事件与累计变化主线。</p>
+            <SummaryVisualPanel
               rows={threeDaySummaryRows.slice(0, 8)}
+              titlePrefix="近三日"
               emptyText="近三日暂无变化事件汇总。"
               onSelectTicker={(ticker) => {
                 setSelectedTicker(ticker)
                 setSelectionSource('近三日 Summary')
-                setTableMode('daily_summary')
+                setSummaryWindowMode('three_day')
+                setTableMode('summary')
               }}
             />
           </section>
 
           <section className={CARD_CLASS}>
             <h2 className="mb-3 text-lg font-semibold">延续活动</h2>
-            <p className="mb-3 text-xs text-slate-500">相对于最近一次有效变化快照仍在持续异常出现，并展示 Vol / OI 的前后变化。</p>
+            <p className="mb-3 text-xs text-slate-500">相对于最近一次有效变化快照仍在持续异常出现，并突出展示 Vol / OI 的前后变化与 delta。</p>
             <ContinuingActivityPanel
               rows={continuingRows}
               onSelect={(contract) => {
@@ -1002,15 +1188,32 @@ export default function App() {
               <div className="text-right text-sm text-slate-500">
                 <div>共 {totalTableRows} 条</div>
                 {selectionSource ? <div>来源：{selectionSource}</div> : null}
+                {tableMode === 'summary' ? <div>排序：{String(summarySort.key)} {summarySort.dir === 'asc' ? '升序' : '降序'}</div> : null}
               </div>
             </div>
             <div className="mb-3 flex flex-wrap gap-2">
               <button onClick={() => setTableMode('current')} className={`rounded-lg border px-3 py-1 text-sm ${tableMode === 'current' ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-300'}`}>当前快照</button>
-              <button onClick={() => setTableMode('events')} className={`rounded-lg border px-3 py-1 text-sm ${tableMode === 'events' ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-300'}`}>最近变化</button>
-              <button onClick={() => setTableMode('daily_summary')} className={`rounded-lg border px-3 py-1 text-sm ${tableMode === 'daily_summary' ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-300'}`}>日内汇总</button>
+              <button onClick={() => setTableMode('events')} className={`rounded-lg border px-3 py-1 text-sm ${tableMode === 'events' ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-300'}`}>日内变化</button>
+              <button onClick={() => setTableMode('summary')} className={`rounded-lg border px-3 py-1 text-sm ${tableMode === 'summary' ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-300'}`}>总结汇总</button>
+              {tableMode === 'summary' ? (
+                <div className="ml-2 inline-flex rounded-lg border border-slate-300 p-1">
+                  <button onClick={() => setSummaryWindowMode('daily')} className={`rounded px-3 py-1 text-sm ${summaryWindowMode === 'daily' ? 'bg-slate-900 text-white' : 'text-slate-700'}`}>日内</button>
+                  <button onClick={() => setSummaryWindowMode('three_day')} className={`rounded px-3 py-1 text-sm ${summaryWindowMode === 'three_day' ? 'bg-slate-900 text-white' : 'text-slate-700'}`}>近三日</button>
+                </div>
+              ) : null}
             </div>
             <div className="mb-3 flex flex-wrap gap-2">
               <span className="rounded-full border border-slate-300 bg-slate-50 px-3 py-1 text-xs">{source.toUpperCase()}</span>
+              {tableMode === 'events' && data?.metadata?.window_start_time ? (
+                <span className="rounded-full border border-slate-300 bg-slate-50 px-3 py-1 text-xs">
+                  日内窗口：{data.metadata.window_start_time} {'->'} {data.metadata.window_end_time ?? '-'}
+                </span>
+              ) : null}
+              {tableMode === 'summary' && filteredSummaryRows[0] ? (
+                <span className="rounded-full border border-slate-300 bg-slate-50 px-3 py-1 text-xs">
+                  汇总窗口：{filteredSummaryRows[0].windowStartTime} {'->'} {filteredSummaryRows[0].windowEndTime}
+                </span>
+              ) : null}
               {activeFilters.map((f) => (
                 <span key={`table-${f.key}`} className="rounded-full border border-slate-300 bg-slate-50 px-3 py-1 text-xs">
                   {f.label}
@@ -1027,7 +1230,7 @@ export default function App() {
                   ) : tableMode === 'events' ? (
                     <EventTable rows={pagedRows as ChangeEventRow[]} selectedContract={selectedContract} />
                   ) : (
-                    <DailySummaryTable rows={pagedRows as SummaryTickerRow[]} />
+                    <SummaryTable rows={pagedRows as SummaryTickerRow[]} onSortHeader={onSummarySortHeader} sortState={summarySort} />
                   )}
                 </div>
                 <div className="mt-3 flex items-center justify-end gap-2 text-sm">
@@ -1044,8 +1247,23 @@ export default function App() {
   )
 }
 
-function ChangeFeedPanel({ rows, onSelect }: { rows: ChangeEventRow[]; onSelect: (row: ChangeEventRow) => void }) {
-  if (rows.length === 0) return <div className="text-sm text-slate-500">最近没有可展示的变化事件。</div>
+function ChangeFeedPanel({
+  rows,
+  hiddenInactiveCount,
+  onSelect,
+}: {
+  rows: ChangeEventRow[]
+  hiddenInactiveCount: number
+  onSelect: (row: ChangeEventRow) => void
+}) {
+  if (rows.length === 0) {
+    return (
+      <div className="text-sm text-slate-500">
+        最近没有可展示的变化事件。
+        {hiddenInactiveCount > 0 ? ` 当前有 ${hiddenInactiveCount} 条 INACTIVE 事件被默认隐藏，可切换筛选查看。` : ''}
+      </div>
+    )
+  }
   return (
     <div className="space-y-2">
       {rows.map((row) => {
@@ -1080,59 +1298,297 @@ function ChangeFeedPanel({ rows, onSelect }: { rows: ChangeEventRow[]; onSelect:
   )
 }
 
-function CurrentSnapshotPanel({ rows, onSelect, selected }: { rows: ContractRow[]; onSelect: (contract: string | null) => void; selected: string | null }) {
-  if (rows.length === 0) return <div className="text-sm text-slate-500">当前没有 active contracts。</div>
+function CurrentOverviewPanel({
+  overview,
+  rows,
+  onSelect,
+  selected,
+}: {
+  overview: CurrentOverview
+  rows: ContractRow[]
+  onSelect: (contract: string | null) => void
+  selected: string | null
+}) {
+  if (overview.activeContractCount === 0) return <div className="text-sm text-slate-500">当前没有 active contracts。</div>
   return (
-    <div className="space-y-2">
-      {rows.map((r) => (
-        <button
-          key={r.id}
-          onClick={() => onSelect(selected === r.contractSymbol ? null : r.contractSymbol)}
-          className={`block w-full rounded-xl border p-3 text-left ${selected === r.contractSymbol ? 'border-slate-900 bg-slate-50' : 'border-slate-200'}`}
-        >
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex items-center gap-2">
-              <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${r.isNew ? 'bg-rose-100 text-rose-700' : 'bg-amber-100 text-amber-700'}`}>
-                {r.isNew ? 'NEW' : 'CONTINUED'}
-              </span>
-              <span className="font-semibold">{r.contractDisplayName}</span>
-              <span className="text-xs text-slate-500">{r.ticker}</span>
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+        <MetricCard label="当前 active contracts" value={overview.activeContractCount} />
+        <MetricCard label="当前 active tickers" value={overview.activeTickerCount} />
+        <MetricCard label="当前 Top ticker" value={overview.topTicker} />
+        <MetricCard label="Put / Call" value={`${(overview.putRatio * 100).toFixed(0)}% / ${(overview.callRatio * 100).toFixed(0)}%`} />
+      </div>
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <MiniBarList
+          title="当前 Top Ticker"
+          rows={overview.tickerVolumeTop.map((row) => ({
+            label: row.ticker,
+            value: row.totalVolume,
+            sublabel: `${row.rows} contracts`,
+          }))}
+        />
+        <MiniBarList
+          title="当前 DTE 分布"
+          rows={overview.dteDistribution.map((row) => ({
+            label: row.label,
+            value: row.value,
+          }))}
+        />
+      </div>
+      <div className="space-y-2">
+        <div className="text-sm font-medium text-slate-700">最强 active contracts</div>
+        {rows.map((r) => (
+          <button
+            key={r.id}
+            onClick={() => onSelect(selected === r.contractSymbol ? null : r.contractSymbol)}
+            className={`block w-full rounded-xl border p-3 text-left ${selected === r.contractSymbol ? 'border-slate-900 bg-slate-50' : 'border-slate-200'}`}
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <span className="font-semibold">{r.contractDisplayName}</span>
+                <span className="text-xs text-slate-500">{r.ticker}</span>
+              </div>
+              <span className="text-sm font-semibold text-slate-700">{formatCompact(r.optionsVolume)}</span>
             </div>
-            <span className="text-sm font-semibold text-slate-700">{formatCompact(r.optionsVolume)}</span>
-          </div>
-          <div className="mt-2 flex flex-wrap gap-3 text-xs text-slate-500">
-            <span>{r.optionType}</span>
-            <span>Exp {formatShortDate(r.expirationDate)}</span>
-            <span>Strike {r.strike}</span>
-            <span>OI {formatCompact(r.openInterest)}</span>
-            <span>Vol/OI {r.volOi.toFixed(2)}</span>
-          </div>
-        </button>
-      ))}
+            <div className="mt-2 flex flex-wrap gap-3 text-xs text-slate-500">
+              <span>{r.optionType}</span>
+              <span>Exp {formatShortDate(r.expirationDate)}</span>
+              <span>Strike {r.strike}</span>
+              <span>OI {formatCompact(r.openInterest)}</span>
+              <span>Vol/OI {r.volOi.toFixed(2)}</span>
+            </div>
+          </button>
+        ))}
+      </div>
     </div>
   )
 }
 
-function SummaryTickerPanel({ rows, emptyText, onSelectTicker }: { rows: SummaryTickerRow[]; emptyText: string; onSelectTicker: (ticker: string) => void }) {
+function SummaryVisualPanel({
+  rows,
+  titlePrefix,
+  emptyText,
+  onSelectTicker,
+}: {
+  rows: SummaryTickerRow[]
+  titlePrefix: string
+  emptyText: string
+  onSelectTicker: (ticker: string) => void
+}) {
   if (rows.length === 0) return <div className="text-sm text-slate-500">{emptyText}</div>
+  const totalNew = rows.reduce((sum, row) => sum + row.totalNewCount, 0)
+  const totalUpdate = rows.reduce((sum, row) => sum + row.totalUpdateCount, 0)
+  const totalInactive = rows.reduce((sum, row) => sum + row.totalInactiveCount, 0)
+  const weightedPut = rows.reduce((sum, row) => sum + row.putRatio * Math.max(row.eventCount, 1), 0)
+  const weightedCall = rows.reduce((sum, row) => sum + row.callRatio * Math.max(row.eventCount, 1), 0)
+  const totalWeight = rows.reduce((sum, row) => sum + Math.max(row.eventCount, 1), 0) || 1
+  const summaryPutRatio = weightedPut / totalWeight
+  const summaryCallRatio = weightedCall / totalWeight
+  const signedDeltaRows = rows
+    .map((row) => ({
+      label: row.ticker,
+      deltaVolume: row.cumulativeDeltaVolume,
+      deltaOpenInterest: row.cumulativeDeltaOpenInterest,
+    }))
+    .sort((a, b) => Math.abs(b.deltaVolume) + Math.abs(b.deltaOpenInterest) - (Math.abs(a.deltaVolume) + Math.abs(a.deltaOpenInterest)))
+    .slice(0, 8)
   return (
-    <div className="space-y-2">
-      {rows.map((row) => (
-        <button key={row.ticker} onClick={() => onSelectTicker(row.ticker)} className="flex w-full items-center justify-between rounded-xl border border-slate-200 px-3 py-3 text-left hover:bg-slate-50">
-          <div>
-            <div className="font-semibold">{row.ticker}</div>
-            <div className="mt-1 flex flex-wrap gap-3 text-xs text-slate-500">
-              <span>NEW {row.totalNewCount}</span>
-              <span>UPDATE {row.totalUpdateCount}</span>
-              <span>INACTIVE {row.totalInactiveCount}</span>
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <MetricCard label={`${titlePrefix} NEW 总数`} value={totalNew} />
+        <MetricCard label={`${titlePrefix} UPDATE 总数`} value={totalUpdate} />
+        <MetricCard label={`${titlePrefix} INACTIVE 总数`} value={totalInactive} />
+        <MetricCard label={`${titlePrefix} Put / Call`} value={`${(summaryPutRatio * 100).toFixed(0)}% / ${(summaryCallRatio * 100).toFixed(0)}%`} />
+      </div>
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+        <MiniBarList
+          title={`${titlePrefix} Top N by event_count`}
+          rows={rows.map((row) => ({
+            label: row.ticker,
+            value: row.eventCount,
+            sublabel: `NEW ${row.totalNewCount} / UPDATE ${row.totalUpdateCount}`,
+          }))}
+          onSelect={onSelectTicker}
+        />
+        <MiniBarList
+          title={`${titlePrefix} Top N by cumulative_delta_volume`}
+          rows={rows.map((row) => ({
+            label: row.ticker,
+            value: Math.abs(row.cumulativeDeltaVolume),
+            sublabel: `${row.cumulativeDeltaVolume >= 0 ? '+' : '-'}${formatCompact(Math.abs(row.cumulativeDeltaVolume))}`,
+          }))}
+          onSelect={onSelectTicker}
+        />
+        <MiniBarList
+          title={`${titlePrefix} Top N by cumulative_delta_open_interest`}
+          rows={rows.map((row) => ({
+            label: row.ticker,
+            value: Math.abs(row.cumulativeDeltaOpenInterest),
+            sublabel: `${row.cumulativeDeltaOpenInterest >= 0 ? '+' : '-'}${formatCompact(Math.abs(row.cumulativeDeltaOpenInterest))}`,
+          }))}
+          onSelect={onSelectTicker}
+        />
+      </div>
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <SummaryMixCard
+          title={`${titlePrefix} 事件结构`}
+          rows={[
+            { label: 'NEW', value: totalNew, color: 'bg-rose-500' },
+            { label: 'UPDATE', value: totalUpdate, color: 'bg-amber-500' },
+            { label: 'INACTIVE', value: totalInactive, color: 'bg-slate-400' },
+          ]}
+        />
+        <SummaryMixCard
+          title={`${titlePrefix} Put / Call 构成`}
+          rows={[
+            { label: 'Put', value: summaryPutRatio * 100, color: 'bg-rose-500' },
+            { label: 'Call', value: summaryCallRatio * 100, color: 'bg-emerald-500' },
+          ]}
+          suffix="%"
+        />
+      </div>
+      <SummaryDeltaPanel rows={signedDeltaRows} onSelectTicker={onSelectTicker} />
+      <div className="space-y-2">
+        {rows.map((row) => (
+          <button key={row.ticker} onClick={() => onSelectTicker(row.ticker)} className="flex w-full items-center justify-between rounded-xl border border-slate-200 px-3 py-3 text-left hover:bg-slate-50">
+            <div>
+              <div className="font-semibold">{row.ticker}</div>
+              <div className="mt-1 flex flex-wrap gap-3 text-xs text-slate-500">
+                <span>NEW {row.totalNewCount}</span>
+                <span>UPDATE {row.totalUpdateCount}</span>
+                <span>INACTIVE {row.totalInactiveCount}</span>
+                <span>Put/Call {(row.putRatio * 100).toFixed(0)}% / {(row.callRatio * 100).toFixed(0)}%</span>
+              </div>
+            </div>
+            <div className="text-right text-xs text-slate-500">
+              <div>ΔVol {row.cumulativeDeltaVolume >= 0 ? '+' : '-'}{formatCompact(Math.abs(row.cumulativeDeltaVolume))}</div>
+              <div>ΔOI {row.cumulativeDeltaOpenInterest >= 0 ? '+' : '-'}{formatCompact(Math.abs(row.cumulativeDeltaOpenInterest))}</div>
+            </div>
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function MiniBarList({
+  title,
+  rows,
+  onSelect,
+}: {
+  title: string
+  rows: Array<{ label: string; value: number; sublabel?: string }>
+  onSelect?: (label: string) => void
+}) {
+  const topRows = rows.slice(0, 8)
+  const maxValue = Math.max(...topRows.map((row) => row.value), 1)
+  return (
+    <div className="rounded-xl border border-slate-200 p-3">
+      <div className="mb-3 text-sm font-medium text-slate-700">{title}</div>
+      <div className="space-y-2">
+        {topRows.map((row) => {
+          const content = (
+            <>
+              <div className="mb-1 flex justify-between text-xs text-slate-600">
+                <span>{row.label}</span>
+                <span>{formatCompact(row.value)}</span>
+              </div>
+              <div className="h-2 rounded bg-slate-100">
+                <div className="h-full rounded bg-slate-900" style={{ width: `${(row.value / maxValue) * 100}%` }} />
+              </div>
+              {row.sublabel ? <div className="mt-1 text-[11px] text-slate-500">{row.sublabel}</div> : null}
+            </>
+          )
+          return onSelect ? (
+            <button key={row.label} onClick={() => onSelect(row.label)} className="block w-full text-left">
+              {content}
+            </button>
+          ) : (
+            <div key={row.label}>{content}</div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+function SummaryMixCard({
+  title,
+  rows,
+  suffix = '',
+}: {
+  title: string
+  rows: Array<{ label: string; value: number; color: string }>
+  suffix?: string
+}) {
+  const maxValue = Math.max(...rows.map((row) => row.value), 1)
+  return (
+    <div className="rounded-xl border border-slate-200 p-3">
+      <div className="mb-3 text-sm font-medium text-slate-700">{title}</div>
+      <div className="space-y-3">
+        {rows.map((row) => (
+          <div key={row.label}>
+            <div className="mb-1 flex justify-between text-xs text-slate-600">
+              <span>{row.label}</span>
+              <span>{row.value.toFixed(0)}{suffix}</span>
+            </div>
+            <div className="h-2 rounded bg-slate-100">
+              <div className={`h-full rounded ${row.color}`} style={{ width: `${(row.value / maxValue) * 100}%` }} />
             </div>
           </div>
-          <div className="text-right text-xs text-slate-500">
-            <div>ΔVol {row.cumulativeDeltaVolume >= 0 ? '+' : '-'}{formatCompact(Math.abs(row.cumulativeDeltaVolume))}</div>
-            <div>ΔOI {row.cumulativeDeltaOpenInterest >= 0 ? '+' : '-'}{formatCompact(Math.abs(row.cumulativeDeltaOpenInterest))}</div>
-          </div>
-        </button>
-      ))}
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function SummaryDeltaPanel({
+  rows,
+  onSelectTicker,
+}: {
+  rows: Array<{ label: string; deltaVolume: number; deltaOpenInterest: number }>
+  onSelectTicker: (ticker: string) => void
+}) {
+  if (rows.length === 0) return null
+  const maxAbs = Math.max(
+    ...rows.flatMap((row) => [Math.abs(row.deltaVolume), Math.abs(row.deltaOpenInterest)]),
+    1,
+  )
+  return (
+    <div className="rounded-xl border border-slate-200 p-3">
+      <div className="mb-3 text-sm font-medium text-slate-700">累计变化强度（点击联动表格）</div>
+      <div className="space-y-3">
+        {rows.map((row) => (
+          <button key={row.label} onClick={() => onSelectTicker(row.label)} className="block w-full text-left">
+            <div className="mb-1 flex items-center justify-between text-xs text-slate-600">
+              <span>{row.label}</span>
+              <span>
+                ΔVol {row.deltaVolume >= 0 ? '+' : '-'}{formatCompact(Math.abs(row.deltaVolume))} · ΔOI {row.deltaOpenInterest >= 0 ? '+' : '-'}{formatCompact(Math.abs(row.deltaOpenInterest))}
+              </span>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <div className="mb-1 text-[11px] text-slate-500">Volume</div>
+                <div className="h-2 rounded bg-slate-100">
+                  <div
+                    className={`h-full rounded ${row.deltaVolume >= 0 ? 'bg-emerald-500' : 'bg-rose-500'}`}
+                    style={{ width: `${(Math.abs(row.deltaVolume) / maxAbs) * 100}%` }}
+                  />
+                </div>
+              </div>
+              <div>
+                <div className="mb-1 text-[11px] text-slate-500">Open Interest</div>
+                <div className="h-2 rounded bg-slate-100">
+                  <div
+                    className={`h-full rounded ${row.deltaOpenInterest >= 0 ? 'bg-sky-500' : 'bg-amber-500'}`}
+                    style={{ width: `${(Math.abs(row.deltaOpenInterest) / maxAbs) * 100}%` }}
+                  />
+                </div>
+              </div>
+            </div>
+          </button>
+        ))}
+      </div>
     </div>
   )
 }
@@ -1143,18 +1599,22 @@ function CurrentTable({ rows, onSortHeader, selectedContract }: { rows: Contract
       <thead className="sticky top-0 bg-slate-100">
         <tr>
           {[
-            ['recordedAt', 'last_update_time'],
+            ['snapshotTime', 'snapshot_time'],
             ['ticker', 'ticker'],
             ['contractDisplayName', 'contract_display_name'],
             ['optionType', 'option_type'],
             ['expirationDate', 'expiration_date'],
             ['strike', 'strike'],
             ['dte', 'dte'],
-            ['optionsVolume', 'current_options_volume'],
-            ['openInterest', 'current_open_interest'],
+            ['previousOptionsVolume', 'previous_volume'],
+            ['optionsVolume', 'current_volume'],
+            ['deltaVolume', 'delta_volume'],
+            ['previousOpenInterest', 'previous_oi'],
+            ['openInterest', 'current_oi'],
+            ['deltaOpenInterest', 'delta_oi'],
+            ['estimatedPremium', 'estimated_premium'],
             ['volOi', 'vol_oi_ratio'],
-            ['isNew', 'new'],
-            ['isRefreshed', 'continued'],
+            ['status', 'status'],
           ].map(([key, label]) => (
             <th key={key} onClick={() => onSortHeader(key as keyof ContractRow)} className="cursor-pointer border-b border-slate-200 px-2 py-2 text-left font-semibold">{label}</th>
           ))}
@@ -1163,18 +1623,22 @@ function CurrentTable({ rows, onSortHeader, selectedContract }: { rows: Contract
       <tbody>
         {rows.map((r) => (
           <tr key={r.id} className={`border-b border-slate-100 hover:bg-sky-50 ${selectedContract === r.contractSymbol ? 'bg-amber-50' : ''}`}>
-            <td className="px-2 py-1">{r.recordedAt}</td>
+            <td className="px-2 py-1">{r.snapshotTime}</td>
             <td className="px-2 py-1">{r.ticker}</td>
             <td className="px-2 py-1">{r.contractDisplayName}</td>
             <td className="px-2 py-1">{r.optionType}</td>
             <td className="px-2 py-1">{r.expirationDate}</td>
             <td className="px-2 py-1">{r.strike}</td>
             <td className="px-2 py-1">{r.dte}</td>
+            <td className="px-2 py-1">{r.previousOptionsVolume == null ? '—' : formatCompact(r.previousOptionsVolume)}</td>
             <td className="px-2 py-1">{formatCompact(r.optionsVolume)}</td>
+            <td className="px-2 py-1">{r.deltaVolume == null ? 'N/A' : `${r.deltaVolume >= 0 ? '+' : '-'}${formatCompact(Math.abs(r.deltaVolume))}`}</td>
+            <td className="px-2 py-1">{r.previousOpenInterest == null ? '—' : formatCompact(r.previousOpenInterest)}</td>
             <td className="px-2 py-1">{formatCompact(r.openInterest)}</td>
+            <td className="px-2 py-1">{r.deltaOpenInterest == null ? 'N/A' : `${r.deltaOpenInterest >= 0 ? '+' : '-'}${formatCompact(Math.abs(r.deltaOpenInterest))}`}</td>
+            <td className="px-2 py-1">{formatCompact(r.estimatedPremium)}</td>
             <td className="px-2 py-1">{r.volOi.toFixed(2)}</td>
-            <td className="px-2 py-1">{r.isNew ? '是' : '否'}</td>
-            <td className="px-2 py-1">{r.isRefreshed ? '是' : '否'}</td>
+            <td className="px-2 py-1">{r.status}</td>
           </tr>
         ))}
       </tbody>
@@ -1215,13 +1679,36 @@ function EventTable({ rows, selectedContract }: { rows: ChangeEventRow[]; select
   )
 }
 
-function DailySummaryTable({ rows }: { rows: SummaryTickerRow[] }) {
+function SummaryTable({
+  rows,
+  onSortHeader,
+  sortState,
+}: {
+  rows: SummaryTickerRow[]
+  onSortHeader: (key: keyof SummaryTickerRow) => void
+  sortState: { key: keyof SummaryTickerRow; dir: 'asc' | 'desc' }
+}) {
   return (
     <table className="min-w-full text-xs">
       <thead className="sticky top-0 bg-slate-100">
         <tr>
-          {['ticker', 'total_new_count', 'total_update_count', 'total_inactive_count', 'cumulative_delta_volume', 'cumulative_delta_open_interest', 'event_count', 'last_event_time'].map((label) => (
-            <th key={label} className="border-b border-slate-200 px-2 py-2 text-left font-semibold">{label}</th>
+          {[
+            ['ticker', 'ticker'],
+            ['windowStartTime', 'window_start_time'],
+            ['windowEndTime', 'window_end_time'],
+            ['lastEventTime', 'last_event_time'],
+            ['totalNewCount', 'total_new_count'],
+            ['totalUpdateCount', 'total_update_count'],
+            ['totalInactiveCount', 'total_inactive_count'],
+            ['cumulativeDeltaVolume', 'cumulative_delta_volume'],
+            ['cumulativeDeltaOpenInterest', 'cumulative_delta_open_interest'],
+            ['putRatio', 'put_ratio'],
+            ['callRatio', 'call_ratio'],
+            ['eventCount', 'event_count'],
+          ].map(([key, label]) => (
+            <th key={label} onClick={() => onSortHeader(key as keyof SummaryTickerRow)} className="cursor-pointer border-b border-slate-200 px-2 py-2 text-left font-semibold">
+              {label}{sortLabel(sortState.key === key, sortState.dir)}
+            </th>
           ))}
         </tr>
       </thead>
@@ -1229,13 +1716,17 @@ function DailySummaryTable({ rows }: { rows: SummaryTickerRow[] }) {
         {rows.map((r) => (
           <tr key={`${r.ticker}-${r.lastEventTime}`} className="border-b border-slate-100">
             <td className="px-2 py-1">{r.ticker}</td>
+            <td className="px-2 py-1">{r.windowStartTime}</td>
+            <td className="px-2 py-1">{r.windowEndTime}</td>
+            <td className="px-2 py-1">{r.lastEventTime}</td>
             <td className="px-2 py-1">{r.totalNewCount}</td>
             <td className="px-2 py-1">{r.totalUpdateCount}</td>
             <td className="px-2 py-1">{r.totalInactiveCount}</td>
             <td className="px-2 py-1">{r.cumulativeDeltaVolume >= 0 ? '+' : '-'}{formatCompact(Math.abs(r.cumulativeDeltaVolume))}</td>
             <td className="px-2 py-1">{r.cumulativeDeltaOpenInterest >= 0 ? '+' : '-'}{formatCompact(Math.abs(r.cumulativeDeltaOpenInterest))}</td>
+            <td className="px-2 py-1">{(r.putRatio * 100).toFixed(0)}%</td>
+            <td className="px-2 py-1">{(r.callRatio * 100).toFixed(0)}%</td>
             <td className="px-2 py-1">{r.eventCount}</td>
-            <td className="px-2 py-1">{r.lastEventTime}</td>
           </tr>
         ))}
       </tbody>
@@ -1317,6 +1808,8 @@ function ContinuingActivityPanel({ rows, onSelect, selected }: { rows: ContractR
           const deltaVol = r.deltaVolume ?? (prevVol == null ? null : r.optionsVolume - prevVol)
           const deltaOi = r.deltaOpenInterest ?? (prevOi == null ? null : r.openInterest - prevOi)
           const deltaCls = (value: number | null) => (value == null ? 'text-slate-400' : value >= 0 ? 'text-emerald-600' : 'text-rose-600')
+          const previousLabel = (value: number | null) => (value == null ? '首次出现' : formatCompact(value))
+          const deltaLabel = (value: number | null) => (value == null ? 'N/A' : `${value >= 0 ? '+' : '-'}${formatCompact(Math.abs(value))}`)
 
           return (
             <button
@@ -1332,16 +1825,16 @@ function ContinuingActivityPanel({ rows, onSelect, selected }: { rows: ContractR
               </div>
               <div className="mt-2 grid grid-cols-1 gap-1 text-xs sm:grid-cols-2">
                 <div className="text-slate-600">
-                  Vol: {prevVol == null ? '--' : formatCompact(prevVol)} {'->'} {formatCompact(r.optionsVolume)}
+                  Vol: {previousLabel(prevVol)} {'->'} {formatCompact(r.optionsVolume)}
                 </div>
                 <div className={deltaCls(deltaVol)}>
-                  ΔVol: {deltaVol == null ? '待接入' : `${deltaVol >= 0 ? '+' : '-'}${formatCompact(Math.abs(deltaVol))}`}
+                  ΔVol: {deltaLabel(deltaVol)}
                 </div>
                 <div className="text-slate-600">
-                  OI: {prevOi == null ? '--' : formatCompact(prevOi)} {'->'} {formatCompact(r.openInterest)}
+                  OI: {previousLabel(prevOi)} {'->'} {formatCompact(r.openInterest)}
                 </div>
                 <div className={deltaCls(deltaOi)}>
-                  ΔOI: {deltaOi == null ? '待接入' : `${deltaOi >= 0 ? '+' : '-'}${formatCompact(Math.abs(deltaOi))}`}
+                  ΔOI: {deltaLabel(deltaOi)}
                 </div>
               </div>
               <div className="mt-2 text-xs text-slate-500">

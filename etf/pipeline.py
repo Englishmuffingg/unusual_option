@@ -4,6 +4,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from etf import config as etf_config
+from stock.dashboard_api import mark_dashboard_projection_refresh_failed, refresh_dashboard_projection
 from etf.fetcher import fetch_etf_dataframe
 from stock.maintenance import run_maintenance
 from stock.repository import ingest_dataframe
@@ -25,6 +26,11 @@ def run_full() -> None:
     """ETF：拉取 → 校验/去重/入库 → 留存与 NEW 维护。"""
     run_ingestion()
     run_maintenance(table=etf_config.TABLE_NAME)
+    try:
+        refresh_dashboard_projection(etf_config.TABLE_NAME)
+    except Exception as exc:
+        mark_dashboard_projection_refresh_failed(etf_config.TABLE_NAME, error=str(exc))
+        print(f"[etf] dashboard projection refresh failed: {exc}")
 
 
 if __name__ == "__main__":

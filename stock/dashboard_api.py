@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response
 
 try:
+    from stock.database import connect, ensure_dashboard_projection_table
     from stock.dashboard import (
         DB_PATH,
         dte_profile,
@@ -30,6 +31,7 @@ except ModuleNotFoundError:
     project_root = Path(__file__).resolve().parent.parent
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
+    from stock.database import connect, ensure_dashboard_projection_table  # type: ignore
     from stock.dashboard import (  # type: ignore
         DB_PATH,
         dte_profile,
@@ -44,6 +46,7 @@ except ModuleNotFoundError:
 FOCUS_TICKERS = ["SPY", "GLD", "QQQ", "MSFT"]
 FINGERPRINT_BUCKETS = [0, 1, 5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000, 25_000, 50_000, 100_000]
 DASHBOARD_CACHE: dict[str, dict[str, Any]] = {}
+PROJECTION_ARTIFACT_KEY = "dashboard_payload_v2"
 
 app = FastAPI(title="Unusual Options Dashboard API", version="1.0.0")
 app.add_middleware(
@@ -61,23 +64,255 @@ def _to_float(v: Any, nd: int = 2) -> float:
     return round(float(v), nd)
 
 
-def _dashboard_cache_signature(table: str) -> tuple[str | None, str | None]:
+def _dashboard_cache_signature(table: str) -> tuple[str | None, str | None, str | None, str | None]:
     if not DB_PATH.exists():
-        return None, None
+        return None, None, None, None
 
     conn = sqlite3.connect(DB_PATH)
     try:
         raw_row = conn.execute(
-            f'SELECT MAX(COALESCE(snapshot_at, recorded_at)) FROM "{table}"'
+            f'''
+            SELECT COALESCE(snapshot_at, recorded_at), refresh_id
+            FROM "{table}"
+            WHERE COALESCE(snapshot_at, recorded_at) IS NOT NULL
+            ORDER BY COALESCE(snapshot_at, recorded_at) DESC, refresh_id DESC, id DESC
+            LIMIT 1
+            '''
         ).fetchone()
         current_row = conn.execute(
-            f'SELECT MAX(COALESCE(last_seen_at, first_seen_at)) FROM "{table}_current_state"'
+            f'''
+            SELECT COALESCE(last_seen_at, first_seen_at), last_refresh_id
+            FROM "{table}_current_state"
+            WHERE COALESCE(last_seen_at, first_seen_at) IS NOT NULL
+            ORDER BY COALESCE(last_seen_at, first_seen_at) DESC, last_refresh_id DESC
+            LIMIT 1
+            '''
         ).fetchone()
-        raw_sig = raw_row[0] if raw_row else None
-        current_sig = current_row[0] if current_row else None
-        return raw_sig, current_sig
+        raw_ts = raw_row[0] if raw_row else None
+        raw_refresh_id = raw_row[1] if raw_row and len(raw_row) > 1 else None
+        current_ts = current_row[0] if current_row else None
+        current_refresh_id = current_row[1] if current_row and len(current_row) > 1 else None
+        raw_sig = f"{raw_ts}|{raw_refresh_id or '-'}" if raw_ts else None
+        current_sig = f"{current_ts}|{current_refresh_id or '-'}" if current_ts else None
+        return raw_sig, current_sig, raw_refresh_id, current_refresh_id
     except sqlite3.Error:
-        return None, None
+        return None, None, None, None
+    finally:
+        conn.close()
+
+
+def _json_default(value: Any) -> Any:
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    if pd.isna(value):
+        return None
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except Exception:
+            return str(value)
+    return str(value)
+
+
+def _attach_cache_status(payload: dict[str, Any], *, artifact_key: str, generated_at: str | None, refresh_status: str | None, last_attempt_at: str | None, last_success_at: str | None, last_error: str | None) -> dict[str, Any]:
+    metadata = payload.setdefault("metadata", {})
+    snapshot_meta = payload.setdefault("snapshot_meta", {})
+    cache_meta = {
+        "artifact_key": artifact_key,
+        "generated_at": generated_at,
+        "refresh_status": refresh_status or "unknown",
+        "last_attempt_at": last_attempt_at,
+        "last_success_at": last_success_at,
+        "last_error": last_error,
+    }
+    metadata.update(
+        {
+            "artifact_key": artifact_key,
+            "cache_generated_at": generated_at,
+            "cache_refresh_status": refresh_status or "unknown",
+            "cache_last_attempt_at": last_attempt_at,
+            "cache_last_success_at": last_success_at,
+            "cache_last_error": last_error,
+        }
+    )
+    snapshot_meta.update(
+        {
+            "artifact_key": artifact_key,
+            "cache_generated_at": generated_at,
+            "cache_refresh_status": refresh_status or "unknown",
+            "cache_last_attempt_at": last_attempt_at,
+            "cache_last_success_at": last_success_at,
+            "cache_last_error": last_error,
+        }
+    )
+    payload["cache_meta"] = cache_meta
+    return payload
+
+
+def _load_projection_payload(table: str, raw_signature: str | None, current_signature: str | None) -> dict[str, Any] | None:
+    conn = connect()
+    try:
+        cache_table = ensure_dashboard_projection_table(conn)
+        row = conn.execute(
+            f'''
+            SELECT payload_json, generated_at, refresh_status, last_attempt_at, last_success_at, last_error
+            FROM "{cache_table}"
+            WHERE dataset = ? AND artifact_key = ? AND raw_signature IS ? AND current_signature IS ?
+            ''',
+            (table, PROJECTION_ARTIFACT_KEY, raw_signature, current_signature),
+        ).fetchone()
+        if not row or not row[0]:
+            return None
+        payload = json.loads(str(row[0]))
+        return _attach_cache_status(
+            payload,
+            artifact_key=PROJECTION_ARTIFACT_KEY,
+            generated_at=str(row[1]) if row[1] is not None else None,
+            refresh_status=str(row[2]) if row[2] is not None else None,
+            last_attempt_at=str(row[3]) if row[3] is not None else None,
+            last_success_at=str(row[4]) if row[4] is not None else None,
+            last_error=str(row[5]) if row[5] is not None else None,
+        )
+    finally:
+        conn.close()
+
+
+def _store_projection_payload(
+    table: str,
+    *,
+    payload: dict[str, Any],
+    raw_signature: str | None,
+    current_signature: str | None,
+    raw_refresh_id: str | None,
+    current_refresh_id: str | None,
+    snapshot_time: str | None,
+    window_start_time: str | None,
+    window_end_time: str | None,
+    generated_at: str,
+) -> None:
+    conn = connect()
+    try:
+        cache_table = ensure_dashboard_projection_table(conn)
+        conn.execute(
+            f'DELETE FROM "{cache_table}" WHERE dataset = ? AND artifact_key <> ?',
+            (table, PROJECTION_ARTIFACT_KEY),
+        )
+        conn.execute(
+            f'''
+            INSERT INTO "{cache_table}" (
+                dataset, artifact_key, raw_signature, current_signature,
+                raw_refresh_id, current_refresh_id,
+                snapshot_time, window_start_time, window_end_time,
+                refresh_status, last_attempt_at, last_success_at, last_error,
+                generated_at, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(dataset, artifact_key) DO UPDATE SET
+                raw_signature = excluded.raw_signature,
+                current_signature = excluded.current_signature,
+                raw_refresh_id = excluded.raw_refresh_id,
+                current_refresh_id = excluded.current_refresh_id,
+                snapshot_time = excluded.snapshot_time,
+                window_start_time = excluded.window_start_time,
+                window_end_time = excluded.window_end_time,
+                refresh_status = excluded.refresh_status,
+                last_attempt_at = excluded.last_attempt_at,
+                last_success_at = excluded.last_success_at,
+                last_error = excluded.last_error,
+                generated_at = excluded.generated_at,
+                payload_json = excluded.payload_json
+            ''',
+            (
+                table,
+                PROJECTION_ARTIFACT_KEY,
+                raw_signature,
+                current_signature,
+                raw_refresh_id,
+                current_refresh_id,
+                snapshot_time,
+                window_start_time,
+                window_end_time,
+                "success",
+                generated_at,
+                generated_at,
+                None,
+                generated_at,
+                json.dumps(payload, ensure_ascii=False, default=_json_default),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def mark_dashboard_projection_refresh_failed(
+    table: str,
+    *,
+    error: str,
+    raw_signature: str | None = None,
+    current_signature: str | None = None,
+    raw_refresh_id: str | None = None,
+    current_refresh_id: str | None = None,
+) -> None:
+    attempted_at = _local_generated_at()
+    conn = connect()
+    try:
+        cache_table = ensure_dashboard_projection_table(conn)
+        conn.execute(
+            f'DELETE FROM "{cache_table}" WHERE dataset = ? AND artifact_key <> ?',
+            (table, PROJECTION_ARTIFACT_KEY),
+        )
+        existing = conn.execute(
+            f'''
+            SELECT snapshot_time, window_start_time, window_end_time, generated_at, payload_json, last_success_at
+            FROM "{cache_table}"
+            WHERE dataset = ? AND artifact_key = ?
+            ''',
+            (table, PROJECTION_ARTIFACT_KEY),
+        ).fetchone()
+        snapshot_time = existing[0] if existing else None
+        window_start_time = existing[1] if existing else None
+        window_end_time = existing[2] if existing else None
+        generated_at = existing[3] if existing else attempted_at
+        payload_json = existing[4] if existing and existing[4] else "{}"
+        last_success_at = existing[5] if existing else None
+        conn.execute(
+            f'''
+            INSERT INTO "{cache_table}" (
+                dataset, artifact_key, raw_signature, current_signature,
+                raw_refresh_id, current_refresh_id,
+                snapshot_time, window_start_time, window_end_time,
+                refresh_status, last_attempt_at, last_success_at, last_error,
+                generated_at, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(dataset, artifact_key) DO UPDATE SET
+                raw_signature = excluded.raw_signature,
+                current_signature = excluded.current_signature,
+                raw_refresh_id = excluded.raw_refresh_id,
+                current_refresh_id = excluded.current_refresh_id,
+                refresh_status = excluded.refresh_status,
+                last_attempt_at = excluded.last_attempt_at,
+                last_success_at = excluded.last_success_at,
+                last_error = excluded.last_error
+            ''',
+            (
+                table,
+                PROJECTION_ARTIFACT_KEY,
+                raw_signature,
+                current_signature,
+                raw_refresh_id,
+                current_refresh_id,
+                snapshot_time,
+                window_start_time,
+                window_end_time,
+                "failed",
+                attempted_at,
+                last_success_at,
+                error[:1000],
+                generated_at,
+                payload_json,
+            ),
+        )
+        conn.commit()
     finally:
         conn.close()
 
@@ -180,6 +415,7 @@ def _section_payload(df: pd.DataFrame, name: str, dataset_name: str) -> dict[str
     bubble = summary[["ticker", "median_dte", "bullish_score", "total_est_premium", "avg_ratio", "flow_desc"]].fillna(0).to_dict("records") if not summary.empty else []
 
     contracts_cols = [
+        "snapshot_time",
         "ticker",
         "ticker_type",
         "contract_signature",
@@ -197,9 +433,12 @@ def _section_payload(df: pd.DataFrame, name: str, dataset_name: str) -> dict[str
         "is_new",
         "recorded_at",
         "previous_options_volume",
+        "current_options_volume",
         "previous_open_interest",
+        "current_open_interest",
         "delta_volume",
         "delta_open_interest",
+        "status",
     ]
     contracts_cols = [c for c in contracts_cols if c in df.columns]
 
@@ -221,6 +460,68 @@ def _section_payload(df: pd.DataFrame, name: str, dataset_name: str) -> dict[str
         "dte_profile": dte.to_dict("records"),
         "strike_profile": strikes[["ticker", "option_type", "strike", "total_est_premium", "rows"]].to_dict("records") if not strikes.empty else [],
         "focus_blocks": _focus_blocks(df, summary, dataset_name),
+        "contracts": contracts,
+        "best_ticker": best_ticker,
+    }
+
+
+def _light_section_payload(df: pd.DataFrame, name: str) -> dict[str, Any]:
+    contracts_cols = [
+        "snapshot_time",
+        "ticker",
+        "ticker_type",
+        "contract_signature",
+        "contract_symbol",
+        "contract_display_name",
+        "option_type",
+        "strike",
+        "expiration_date",
+        "dte",
+        "options_volume",
+        "current_options_volume",
+        "open_interest",
+        "current_open_interest",
+        "volume_to_open_interest_ratio",
+        "estimated_premium",
+        "is_refreshed",
+        "is_new",
+        "status",
+        "recorded_at",
+        "previous_options_volume",
+        "previous_open_interest",
+        "delta_volume",
+        "delta_open_interest",
+    ]
+    contracts_cols = [c for c in contracts_cols if c in df.columns]
+    contracts = []
+    if contracts_cols:
+        contracts = (
+            df[contracts_cols]
+            .copy()
+            .sort_values(["estimated_premium", "options_volume"], ascending=[False, False])
+            .head(600)
+            .where(pd.notna, None)
+            .to_dict("records")
+        )
+
+    best_ticker = "-"
+    if not df.empty and "ticker" in df.columns:
+        ticker_score = (
+            normalize_df(df)
+            .groupby("ticker", dropna=False)["estimated_premium"]
+            .sum()
+            .sort_values(ascending=False)
+        )
+        if not ticker_score.empty:
+            best_ticker = str(ticker_score.index[0])
+
+    return {
+        "key": name,
+        "summary": [],
+        "bubble": [],
+        "dte_profile": [],
+        "strike_profile": [],
+        "focus_blocks": [],
         "contracts": contracts,
         "best_ticker": best_ticker,
     }
@@ -389,9 +690,10 @@ def _build_contract_comparison_from_agg(cur: pd.DataFrame, prev: pd.DataFrame) -
 
 def _latest_previous_frames_by_effective_change(
     raw_df: pd.DataFrame,
+    effective_batches: list[dict[str, Any]] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, Any, Any, str]:
     empty = raw_df.iloc[0:0].copy()
-    effective_batches = _effective_snapshot_batches(raw_df)
+    effective_batches = effective_batches if effective_batches is not None else _effective_snapshot_batches(raw_df)
     if not effective_batches:
         return empty, empty, None, None, "effective_change_previous"
 
@@ -502,13 +804,81 @@ def _snapshot_summary(df: pd.DataFrame, inactive_count: int = 0) -> dict[str, An
     }
 
 
-def _build_change_feed(raw_df: pd.DataFrame, limit: int = 200) -> list[dict[str, Any]]:
-    effective_batches = _effective_snapshot_batches(raw_df)
+def _top_metric_rows(rows: list[dict[str, Any]], key: str, top_n: int = 8) -> list[dict[str, Any]]:
+    ranked = sorted(rows, key=lambda row: float(row.get(key) or 0), reverse=True)
+    return ranked[:top_n]
+
+
+def _build_current_overview(df: pd.DataFrame) -> dict[str, Any]:
+    work = normalize_df(df)
+    if work.empty:
+        return {
+            "active_contract_count": 0,
+            "active_ticker_count": 0,
+            "top_ticker": "-",
+            "put_ratio": 0.0,
+            "call_ratio": 0.0,
+            "dte_distribution": [],
+            "ticker_volume_top": [],
+            "top_active_contracts": [],
+        }
+
+    ticker_summary = (
+        work.groupby("ticker", dropna=False)
+        .agg(total_volume=("options_volume", "sum"), rows=("contract_symbol", "count"))
+        .reset_index()
+        .sort_values(["total_volume", "rows"], ascending=[False, False])
+    )
+    dte_summary = (
+        work.groupby("dte_bucket", dropna=False)
+        .agg(total_volume=("options_volume", "sum"))
+        .reset_index()
+        .sort_values("total_volume", ascending=False)
+    )
+    total_rows = len(work)
+    put_ratio = float((work["option_type"] == "PUT").sum()) / total_rows if total_rows else 0.0
+    call_ratio = float((work["option_type"] == "CALL").sum()) / total_rows if total_rows else 0.0
+
+    top_contracts = (
+        work.sort_values(["estimated_premium", "options_volume"], ascending=[False, False])
+        .head(6)[
+            [
+                "ticker",
+                "contract_symbol",
+                "contract_display_name",
+                "option_type",
+                "expiration_date",
+                "strike",
+                "options_volume",
+                "open_interest",
+                "volume_to_open_interest_ratio",
+            ]
+        ]
+        .where(pd.notna, None)
+        .to_dict("records")
+    )
+
+    return {
+        "active_contract_count": total_rows,
+        "active_ticker_count": int(work["ticker"].nunique()),
+        "top_ticker": str(ticker_summary.iloc[0]["ticker"]) if not ticker_summary.empty else "-",
+        "put_ratio": _to_float(put_ratio, 4),
+        "call_ratio": _to_float(call_ratio, 4),
+        "dte_distribution": dte_summary.where(pd.notna, None).to_dict("records"),
+        "ticker_volume_top": ticker_summary.head(8).where(pd.notna, None).to_dict("records"),
+        "top_active_contracts": top_contracts,
+    }
+
+
+def _build_change_feed_from_batches(
+    effective_batches: list[dict[str, Any]],
+    limit: int = 200,
+) -> list[dict[str, Any]]:
     if len(effective_batches) < 2:
         return []
 
     events: list[dict[str, Any]] = []
-    recent_batches = effective_batches[-25:]
+    recent_batches = effective_batches[-16:]
     for idx in range(1, len(recent_batches)):
         previous_batch = recent_batches[idx - 1]
         latest_batch = recent_batches[idx]
@@ -523,12 +893,20 @@ def _build_change_feed(raw_df: pd.DataFrame, limit: int = 200) -> list[dict[str,
         new_rows = comparison[comparison["status"] == "new"].copy()
         if not new_rows.empty:
             new_rows["event_type"] = "NEW"
-            events.extend(new_rows.to_dict("records"))
+            new_rows["rank_score"] = (
+                pd.to_numeric(new_rows["estimated_premium_cur"], errors="coerce").fillna(0)
+                + pd.to_numeric(new_rows["options_volume_cur"], errors="coerce").fillna(0)
+            )
+            events.extend(new_rows.sort_values("rank_score", ascending=False).head(20).to_dict("records"))
 
         inactive_rows = comparison[comparison["status"] == "inactive"].copy()
         if not inactive_rows.empty:
             inactive_rows["event_type"] = "INACTIVE"
-            events.extend(inactive_rows.to_dict("records"))
+            inactive_rows["rank_score"] = (
+                pd.to_numeric(inactive_rows["estimated_premium_prev"], errors="coerce").fillna(0)
+                + pd.to_numeric(inactive_rows["options_volume_prev"], errors="coerce").fillna(0)
+            )
+            events.extend(inactive_rows.sort_values("rank_score", ascending=False).head(10).to_dict("records"))
 
         update_rows = comparison[
             (comparison["status"] == "continued")
@@ -540,7 +918,12 @@ def _build_change_feed(raw_df: pd.DataFrame, limit: int = 200) -> list[dict[str,
         ].copy()
         if not update_rows.empty:
             update_rows["event_type"] = "UPDATE"
-            events.extend(update_rows.to_dict("records"))
+            update_rows["rank_score"] = (
+                pd.to_numeric(update_rows["delta_volume"], errors="coerce").fillna(0).abs()
+                + pd.to_numeric(update_rows["delta_open_interest"], errors="coerce").fillna(0).abs()
+                + pd.to_numeric(update_rows["delta_premium"], errors="coerce").fillna(0).abs()
+            )
+            events.extend(update_rows.sort_values("rank_score", ascending=False).head(40).to_dict("records"))
 
     if not events:
         return []
@@ -572,7 +955,14 @@ def _build_change_feed(raw_df: pd.DataFrame, limit: int = 200) -> list[dict[str,
     feed["dte"] = pd.to_numeric(feed.get("dte_cur", 0), errors="coerce").fillna(
         pd.to_numeric(feed.get("dte_prev", 0), errors="coerce").fillna(0)
     )
-    feed = feed.sort_values(["event_time", "event_type", "estimated_premium"], ascending=[False, True, False]).head(limit)
+    priority_map = {"NEW": 0, "UPDATE": 1, "INACTIVE": 2}
+    feed["event_priority"] = feed["event_type"].map(priority_map).fillna(9)
+    if "rank_score" not in feed.columns:
+        feed["rank_score"] = 0
+    feed = feed.sort_values(
+        ["event_time", "event_priority", "rank_score", "estimated_premium"],
+        ascending=[False, True, False, False],
+    ).head(limit)
     out_cols = [
         "event_time",
         "event_type",
@@ -597,7 +987,33 @@ def _build_change_feed(raw_df: pd.DataFrame, limit: int = 200) -> list[dict[str,
     return feed[out_cols].where(pd.notna(feed[out_cols]), None).to_dict("records")
 
 
-def _build_period_summary(change_feed: list[dict[str, Any]], days: int) -> list[dict[str, Any]]:
+def _intraday_window_start(
+    raw_df: pd.DataFrame,
+    latest_ts: Any,
+    effective_batches: list[dict[str, Any]] | None = None,
+) -> pd.Timestamp | None:
+    latest = pd.to_datetime(latest_ts, errors="coerce")
+    if pd.isna(latest):
+        return None
+
+    effective_batches = effective_batches if effective_batches is not None else _effective_snapshot_batches(raw_df)
+    same_day = [
+        pd.to_datetime(batch["snapshot_time"], errors="coerce")
+        for batch in effective_batches
+        if pd.to_datetime(batch["snapshot_time"], errors="coerce").date() == latest.date()
+    ]
+    same_day = [ts for ts in same_day if pd.notna(ts)]
+    if same_day:
+        return min(same_day)
+    return latest.normalize() + pd.Timedelta(hours=8, minutes=30)
+
+
+def _build_period_summary(
+    change_feed: list[dict[str, Any]],
+    *,
+    window_start: pd.Timestamp | None,
+    window_end: pd.Timestamp | None,
+) -> list[dict[str, Any]]:
     if not change_feed:
         return []
     feed = pd.DataFrame(change_feed)
@@ -606,9 +1022,12 @@ def _build_period_summary(change_feed: list[dict[str, Any]], days: int) -> list[
     if feed.empty:
         return []
 
-    latest_time = feed["event_time"].max()
-    window_start = latest_time.normalize() - pd.Timedelta(days=days - 1)
-    window = feed[feed["event_time"] >= window_start].copy()
+    if window_end is None:
+        window_end = feed["event_time"].max()
+    if window_start is None:
+        window_start = feed["event_time"].min()
+
+    window = feed[(feed["event_time"] >= window_start) & (feed["event_time"] <= window_end)].copy()
     if window.empty:
         return []
 
@@ -623,6 +1042,8 @@ def _build_period_summary(change_feed: list[dict[str, Any]], days: int) -> list[
             cumulative_estimated_premium=("estimated_premium", "sum"),
             event_count=("event_type", "count"),
             last_event_time=("event_time", "max"),
+            put_events=("option_type", lambda s: int((s.astype(str).str.upper() == "PUT").sum())),
+            call_events=("option_type", lambda s: int((s.astype(str).str.upper() == "CALL").sum())),
         )
         .reset_index()
         .sort_values(
@@ -630,7 +1051,115 @@ def _build_period_summary(change_feed: list[dict[str, Any]], days: int) -> list[
             ascending=[False, False, False],
         )
     )
+    total_events = (summary["put_events"] + summary["call_events"]).replace(0, pd.NA)
+    summary["put_ratio"] = (summary["put_events"] / total_events).fillna(0)
+    summary["call_ratio"] = (summary["call_events"] / total_events).fillna(0)
+    summary["window_start_time"] = str(window_start)
+    summary["window_end_time"] = str(window_end)
+    summary = summary.drop(columns=["put_events", "call_events"])
     return summary.where(pd.notna(summary), None).to_dict("records")
+
+
+def _build_period_summary_from_batches(
+    effective_batches: list[dict[str, Any]],
+    *,
+    window_start: pd.Timestamp | None,
+    window_end: pd.Timestamp | None,
+) -> list[dict[str, Any]]:
+    if len(effective_batches) < 2 or window_end is None:
+        return []
+    if window_start is None:
+        window_start = window_end
+
+    ticker_totals: dict[str, dict[str, Any]] = {}
+    for idx in range(1, len(effective_batches)):
+        previous_batch = effective_batches[idx - 1]
+        latest_batch = effective_batches[idx]
+        event_time = pd.to_datetime(latest_batch["snapshot_time"], errors="coerce")
+        if pd.isna(event_time) or event_time < window_start or event_time > window_end:
+            continue
+
+        comparison = _build_contract_comparison_from_agg(latest_batch["agg"], previous_batch["agg"])
+        if comparison.empty:
+            continue
+
+        comparison["resolved_ticker"] = comparison.get("ticker", "").fillna("")
+        option_type = comparison.get("option_type_cur")
+        if option_type is None:
+            option_type = pd.Series("", index=comparison.index)
+        option_type_prev = comparison.get("option_type_prev")
+        if option_type_prev is not None:
+            option_type = option_type.fillna(option_type_prev)
+        comparison["resolved_option_type"] = option_type.astype(str).str.upper()
+
+        grouped = (
+            comparison.groupby("resolved_ticker", dropna=False)
+            .agg(
+                total_new_count=("status", lambda s: int((s == "new").sum())),
+                total_update_count=("status", lambda s: int((s == "continued").sum())),
+                total_inactive_count=("status", lambda s: int((s == "inactive").sum())),
+                cumulative_delta_volume=("delta_volume", "sum"),
+                cumulative_delta_open_interest=("delta_open_interest", "sum"),
+                cumulative_estimated_premium=("delta_premium", "sum"),
+                event_count=("status", lambda s: int(((s == "new") | (s == "continued") | (s == "inactive")).sum())),
+                put_events=("resolved_option_type", lambda s: int((s == "PUT").sum())),
+                call_events=("resolved_option_type", lambda s: int((s == "CALL").sum())),
+            )
+            .reset_index()
+        )
+
+        for row in grouped.to_dict("records"):
+            ticker = str(row.get("resolved_ticker") or "-").upper()
+            acc = ticker_totals.setdefault(
+                ticker,
+                {
+                    "ticker": ticker,
+                    "window_start_time": str(window_start),
+                    "window_end_time": str(window_end),
+                    "last_event_time": str(event_time),
+                    "total_new_count": 0,
+                    "total_update_count": 0,
+                    "total_inactive_count": 0,
+                    "cumulative_delta_volume": 0.0,
+                    "cumulative_delta_open_interest": 0.0,
+                    "cumulative_estimated_premium": 0.0,
+                    "event_count": 0,
+                    "put_events": 0,
+                    "call_events": 0,
+                },
+            )
+            acc["last_event_time"] = str(event_time)
+            acc["total_new_count"] += int(row.get("total_new_count") or 0)
+            acc["total_update_count"] += int(row.get("total_update_count") or 0)
+            acc["total_inactive_count"] += int(row.get("total_inactive_count") or 0)
+            acc["cumulative_delta_volume"] += float(row.get("cumulative_delta_volume") or 0)
+            acc["cumulative_delta_open_interest"] += float(row.get("cumulative_delta_open_interest") or 0)
+            acc["cumulative_estimated_premium"] += float(row.get("cumulative_estimated_premium") or 0)
+            acc["event_count"] += int(row.get("event_count") or 0)
+            acc["put_events"] += int(row.get("put_events") or 0)
+            acc["call_events"] += int(row.get("call_events") or 0)
+
+    if not ticker_totals:
+        return []
+
+    out: list[dict[str, Any]] = []
+    for row in ticker_totals.values():
+        total_cp = row["put_events"] + row["call_events"]
+        row["put_ratio"] = _to_float(row["put_events"] / total_cp if total_cp else 0, 4)
+        row["call_ratio"] = _to_float(row["call_events"] / total_cp if total_cp else 0, 4)
+        row.pop("put_events", None)
+        row.pop("call_events", None)
+        out.append(row)
+
+    out.sort(
+        key=lambda row: (
+            int(row.get("event_count") or 0),
+            float(row.get("cumulative_delta_volume") or 0),
+            float(row.get("cumulative_delta_open_interest") or 0),
+        ),
+        reverse=True,
+    )
+    return out
 
 
 def _build_refresh_delta(raw_df: pd.DataFrame) -> dict[str, Any]:
@@ -713,6 +1242,90 @@ def _build_refresh_delta(raw_df: pd.DataFrame) -> dict[str, Any]:
     }
 
 
+def _build_refresh_delta_from_comparison(
+    cur: pd.DataFrame,
+    prev: pd.DataFrame,
+    merged: pd.DataFrame,
+    *,
+    latest_ts: Any,
+    previous_ts: Any,
+    comparison_mode: str,
+) -> dict[str, Any]:
+    if cur.empty and merged.empty:
+        return {
+            "snapshot_time": None,
+            "previous_snapshot_time": None,
+            "comparison_mode": comparison_mode,
+            "contract_count_delta": 0,
+            "options_volume_delta": 0,
+            "estimated_premium_delta": 0,
+            "open_interest_delta": 0,
+            "new_contract_count": 0,
+            "inactive_contract_count": 0,
+            "disappeared_contract_count": 0,
+            "persistent_contract_count": 0,
+            "ticker_rank": [],
+            "contract_changes": [],
+        }
+
+    ticker_rank = (
+        merged.groupby("ticker", dropna=False)
+        .agg(
+            premium_delta=("delta_premium", "sum"),
+            volume_delta=("delta_volume", "sum"),
+            open_interest_delta=("delta_open_interest", "sum"),
+            contract_count_delta=("contract_signature", "count"),
+        )
+        .reset_index()
+        .sort_values("premium_delta", ascending=False)
+        .head(15)
+    ) if not merged.empty else pd.DataFrame()
+
+    changes_cols = [
+        "ticker",
+        "contract_symbol",
+        "contract_display_name_cur",
+        "contract_display_name_prev",
+        "option_type_cur",
+        "option_type_prev",
+        "strike_cur",
+        "strike_prev",
+        "expiration_date_cur",
+        "expiration_date_prev",
+        "dte_cur",
+        "dte_prev",
+        "options_volume_cur",
+        "options_volume_prev",
+        "open_interest_cur",
+        "open_interest_prev",
+        "estimated_premium_cur",
+        "estimated_premium_prev",
+        "delta_volume",
+        "delta_premium",
+        "delta_open_interest",
+        "status",
+    ]
+    change_rows = merged[changes_cols].copy() if not merged.empty else pd.DataFrame(columns=changes_cols)
+    if not change_rows.empty:
+        change_rows = change_rows.sort_values("delta_premium", ascending=False).head(800)
+
+    return {
+        "snapshot_time": str(latest_ts) if latest_ts is not None else None,
+        "previous_snapshot_time": str(previous_ts) if previous_ts is not None else None,
+        "comparison_mode": comparison_mode,
+        "contract_count_delta": int(len(cur) - len(prev)),
+        "options_volume_delta": _to_float(cur["options_volume"].sum() - prev["options_volume"].sum(), 0) if not cur.empty or not prev.empty else 0,
+        "estimated_premium_delta": _to_float(cur["estimated_premium"].sum() - prev["estimated_premium"].sum(), 2) if not cur.empty or not prev.empty else 0,
+        "open_interest_delta": _to_float(cur["open_interest"].sum() - prev["open_interest"].sum(), 0) if not cur.empty or not prev.empty else 0,
+        "new_contract_count": int((merged["status"] == "new").sum()) if not merged.empty else 0,
+        "inactive_contract_count": int((merged["status"] == "inactive").sum()) if not merged.empty else 0,
+        "disappeared_contract_count": int((merged["status"] == "inactive").sum()) if not merged.empty else 0,
+        "persistent_contract_count": int((merged["status"] == "continued").sum()) if not merged.empty else 0,
+        "ticker_rank": ticker_rank.fillna(0).to_dict("records") if not ticker_rank.empty else [],
+        "contract_changes": change_rows.where(pd.notna(change_rows), None).to_dict("records"),
+    }
+
+
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -737,22 +1350,12 @@ def index() -> str:
     """
 
 
-@app.get("/api/dashboard")
-def dashboard_api(
-    table: str = Query("stock", pattern="^(stock|etf)$"),
-    pretty: int = Query(0, ge=0, le=1, description="1=formatted JSON output"),
-) -> dict[str, Any]:
-    raw_signature, current_signature = _dashboard_cache_signature(table)
-    cache_key = f"{table}:{raw_signature}:{current_signature}"
-    cached = DASHBOARD_CACHE.get(cache_key)
-    if cached is not None:
-        if pretty == 1:
-            return Response(
-                content=json.dumps(cached, ensure_ascii=False, indent=2),
-                media_type="application/json; charset=utf-8",
-            )
-        return cached
+def _local_generated_at() -> str:
+    return pd.Timestamp.now(tz="America/Chicago").replace(microsecond=0).isoformat()
 
+
+def _generate_dashboard_payload(table: str) -> dict[str, Any]:
+    raw_signature, current_signature, raw_refresh_id, current_refresh_id = _dashboard_cache_signature(table)
     try:
         raw = load_table_read_only(DB_PATH, table)
     except Exception as exc:
@@ -763,10 +1366,16 @@ def dashboard_api(
     except Exception:
         current_raw = pd.DataFrame()
 
-    latest_raw, previous_raw, latest_ts, previous_ts, comparison_mode = _latest_previous_frames_by_effective_change(raw)
+    effective_batches = _effective_snapshot_batches(raw)
+    latest_raw, previous_raw, latest_ts, previous_ts, comparison_mode = _latest_previous_frames_by_effective_change(
+        raw,
+        effective_batches=effective_batches,
+    )
     latest_df = _ensure_contract_signature(normalize_df(latest_raw))
     previous_df = _ensure_contract_signature(normalize_df(previous_raw))
-    comparison_df = _build_contract_comparison(latest_raw, previous_raw)
+    latest_agg = effective_batches[-1]["agg"] if effective_batches else _aggregate_snapshot_contracts(latest_raw)
+    previous_agg = effective_batches[-2]["agg"] if len(effective_batches) >= 2 else _aggregate_snapshot_contracts(previous_raw)
+    comparison_df = _build_contract_comparison_from_agg(latest_agg, previous_agg)
 
     if current_raw.empty:
         df = latest_df.copy()
@@ -784,6 +1393,7 @@ def dashboard_api(
     df["is_new"] = df["contract_signature"].isin(latest_keys - prev_keys).astype(int)
     df["is_refreshed"] = df["contract_signature"].isin(latest_keys & prev_keys).astype(int)
     df["inactive"] = 0
+    df["snapshot_time"] = str(latest_ts) if latest_ts is not None else None
 
     if not comparison_df.empty:
         previous_fields = comparison_df[
@@ -819,14 +1429,16 @@ def dashboard_api(
         df["delta_volume"] = pd.to_numeric(df["options_volume"], errors="coerce").fillna(0)
         df["delta_open_interest"] = pd.to_numeric(df["open_interest"], errors="coerce").fillna(0)
         df["status"] = "new"
+    df["current_options_volume"] = pd.to_numeric(df["options_volume"], errors="coerce").fillna(0)
+    df["current_open_interest"] = pd.to_numeric(df["open_interest"], errors="coerce").fillna(0)
 
     refreshed_df = df[df["is_refreshed"] == 1].copy()
     today_new_df = df[df["is_new"] == 1].copy()
     inactive_rows = _build_inactive_contract_rows(comparison_df)
 
-    overall_section = _section_payload(df, "overall", table)
-    refreshed_section = _section_payload(refreshed_df, "refreshed", table)
-    today_section = _section_payload(today_new_df, "today_new", table)
+    overall_section = _light_section_payload(df, "overall")
+    refreshed_section = _light_section_payload(refreshed_df, "refreshed")
+    today_section = _light_section_payload(today_new_df, "today_new")
     inactive_section = {
         "key": "inactive_helper",
         "summary": [],
@@ -839,17 +1451,29 @@ def dashboard_api(
     }
 
     overall_summary = _build_summary(df)
-    focus_overall = _focus_blocks(df, overall_summary, table)
-    change_feed = _build_change_feed(raw)
+    change_feed = _build_change_feed_from_batches(effective_batches)
     summary_payload = _snapshot_summary(df, inactive_count=len(inactive_rows))
-    daily_summary = _build_period_summary(change_feed, days=1)
-    three_day_summary = _build_period_summary(change_feed, days=3)
-    strongest_focus = "-"
-    if focus_overall:
-        strongest_focus = max(
-            focus_overall,
-            key=lambda x: float(x.get("avg_ratio", 0)) * (1 + float(x.get("call_premium_pct", 0))),
-        )["ticker"]
+    latest_ts_dt = pd.to_datetime(latest_ts, errors="coerce")
+    intraday_window_start = _intraday_window_start(raw, latest_ts, effective_batches=effective_batches)
+    three_day_window_start = (
+        latest_ts_dt.normalize() - pd.Timedelta(days=2)
+        if pd.notna(latest_ts_dt)
+        else None
+    )
+    window_end = latest_ts_dt if pd.notna(latest_ts_dt) else None
+    daily_summary = _build_period_summary_from_batches(
+        effective_batches,
+        window_start=intraday_window_start,
+        window_end=window_end,
+    )
+    three_day_summary = _build_period_summary_from_batches(
+        effective_batches,
+        window_start=three_day_window_start,
+        window_end=window_end,
+    )
+    current_overview = _build_current_overview(df)
+    strongest_focus = current_overview.get("top_ticker", "-")
+    generated_at = _local_generated_at()
 
     cards = {
         "refreshed_ticker_count": int(refreshed_df["ticker"].nunique()) if not refreshed_df.empty else 0,
@@ -870,16 +1494,33 @@ def dashboard_api(
         "table": table,
         "db_path": str(DB_PATH),
         "comparison_mode": comparison_mode,
+        "dashboard_generated_at": generated_at,
+        "artifact_key": PROJECTION_ARTIFACT_KEY,
         "metadata": {
+            "dashboard_generated_at": generated_at,
             "comparison_mode": comparison_mode,
+            "artifact_key": PROJECTION_ARTIFACT_KEY,
+            "cache_generated_at": generated_at,
+            "cache_refresh_status": "success",
+            "cache_last_attempt_at": generated_at,
+            "cache_last_success_at": generated_at,
+            "cache_last_error": None,
+            "snapshot_time": str(latest_ts) if latest_ts is not None else None,
             "latest_snapshot_time": str(latest_ts) if latest_ts is not None else None,
             "previous_snapshot_time": str(previous_ts) if previous_ts is not None else None,
+            "window_start_time": str(intraday_window_start) if intraday_window_start is not None else None,
+            "window_end_time": str(window_end) if window_end is not None else None,
+            "raw_signature": raw_signature,
+            "current_signature": current_signature,
+            "raw_refresh_id": raw_refresh_id,
+            "current_refresh_id": current_refresh_id,
             "data_source": table,
             "active_filter_summary": {
                 "focus_tickers": FOCUS_TICKERS,
             },
         },
         "summary": summary_payload,
+        "current_overview": current_overview,
         "cards": cards,
         "metric_explanations": [
             "Call premium share high = more call-heavy flow",
@@ -902,16 +1543,101 @@ def dashboard_api(
         "inactive_rows": inactive_rows,
         "daily_summary": daily_summary,
         "three_day_summary": three_day_summary,
-        "refresh_delta": _build_refresh_delta(raw),
+        "refresh_delta": _build_refresh_delta_from_comparison(
+            latest_agg,
+            previous_agg,
+            comparison_df,
+            latest_ts=latest_ts,
+            previous_ts=previous_ts,
+            comparison_mode=comparison_mode,
+        ),
         "snapshot_meta": {
+            "dashboard_generated_at": generated_at,
+            "artifact_key": PROJECTION_ARTIFACT_KEY,
+            "cache_generated_at": generated_at,
+            "cache_refresh_status": "success",
+            "cache_last_attempt_at": generated_at,
+            "cache_last_success_at": generated_at,
+            "cache_last_error": None,
+            "snapshot_time": str(latest_ts) if latest_ts is not None else None,
             "latest_snapshot_time": str(latest_ts) if latest_ts is not None else None,
             "previous_snapshot_time": str(previous_ts) if previous_ts is not None else None,
             "comparison_mode": comparison_mode,
+            "window_start_time": str(intraday_window_start) if intraday_window_start is not None else None,
+            "window_end_time": str(window_end) if window_end is not None else None,
+            "raw_signature": raw_signature,
+            "current_signature": current_signature,
+            "raw_refresh_id": raw_refresh_id,
+            "current_refresh_id": current_refresh_id,
+        },
+        "cache_meta": {
+            "artifact_key": PROJECTION_ARTIFACT_KEY,
+            "generated_at": generated_at,
+            "refresh_status": "success",
+            "last_attempt_at": generated_at,
+            "last_success_at": generated_at,
+            "last_error": None,
         },
     }
-    json_payload = jsonable_encoder(payload)
-    DASHBOARD_CACHE.clear()
-    DASHBOARD_CACHE[cache_key] = json_payload
+    return jsonable_encoder(payload)
+
+
+def refresh_dashboard_projection(table: str) -> dict[str, Any]:
+    raw_signature, current_signature, raw_refresh_id, current_refresh_id = _dashboard_cache_signature(table)
+    try:
+        json_payload = _generate_dashboard_payload(table)
+        metadata = json_payload.get("metadata", {})
+        generated_at = str(json_payload.get("dashboard_generated_at") or _local_generated_at())
+        _store_projection_payload(
+            table,
+            payload=json_payload,
+            raw_signature=raw_signature,
+            current_signature=current_signature,
+            raw_refresh_id=raw_refresh_id,
+            current_refresh_id=current_refresh_id,
+            snapshot_time=metadata.get("snapshot_time"),
+            window_start_time=metadata.get("window_start_time"),
+            window_end_time=metadata.get("window_end_time"),
+            generated_at=generated_at,
+        )
+        json_payload = _attach_cache_status(
+            json_payload,
+            artifact_key=PROJECTION_ARTIFACT_KEY,
+            generated_at=generated_at,
+            refresh_status="success",
+            last_attempt_at=generated_at,
+            last_success_at=generated_at,
+            last_error=None,
+        )
+        cache_key = f"{table}:{raw_signature}:{current_signature}"
+        DASHBOARD_CACHE.clear()
+        DASHBOARD_CACHE[cache_key] = json_payload
+        return json_payload
+    except Exception as exc:
+        mark_dashboard_projection_refresh_failed(
+            table,
+            error=str(exc),
+            raw_signature=raw_signature,
+            current_signature=current_signature,
+            raw_refresh_id=raw_refresh_id,
+            current_refresh_id=current_refresh_id,
+        )
+        raise
+
+
+@app.get("/api/dashboard")
+def dashboard_api(
+    table: str = Query("stock", pattern="^(stock|etf)$"),
+    pretty: int = Query(0, ge=0, le=1, description="1=formatted JSON output"),
+) -> dict[str, Any]:
+    raw_signature, current_signature, _raw_refresh_id, _current_refresh_id = _dashboard_cache_signature(table)
+    cache_key = f"{table}:{raw_signature}:{current_signature}"
+    json_payload = DASHBOARD_CACHE.get(cache_key)
+    if json_payload is None:
+        json_payload = _load_projection_payload(table, raw_signature, current_signature)
+    if json_payload is None:
+        json_payload = refresh_dashboard_projection(table)
+
     if pretty == 1:
         return Response(
             content=json.dumps(json_payload, ensure_ascii=False, indent=2),

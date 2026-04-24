@@ -50,12 +50,46 @@ export type DashboardResponse = {
   table: 'stock' | 'etf'
   db_path: string
   comparison_mode?: string
+  artifact_key?: string | null
+  dashboard_generated_at?: string | null
+  cache_meta?: {
+    artifact_key?: string | null
+    generated_at?: string | null
+    refresh_status?: string | null
+    last_attempt_at?: string | null
+    last_success_at?: string | null
+    last_error?: string | null
+  }
   metadata?: {
     comparison_mode: string
+    dashboard_generated_at?: string | null
+    artifact_key?: string | null
+    cache_generated_at?: string | null
+    cache_refresh_status?: string | null
+    cache_last_attempt_at?: string | null
+    cache_last_success_at?: string | null
+    cache_last_error?: string | null
+    snapshot_time?: string | null
     latest_snapshot_time: string | null
     previous_snapshot_time: string | null
+    window_start_time?: string | null
+    window_end_time?: string | null
+    raw_signature?: string | null
+    current_signature?: string | null
+    raw_refresh_id?: string | null
+    current_refresh_id?: string | null
     data_source: 'stock' | 'etf'
     active_filter_summary?: Record<string, unknown>
+  }
+  current_overview?: {
+    active_contract_count: number
+    active_ticker_count: number
+    top_ticker: string
+    put_ratio: number
+    call_ratio: number
+    dte_distribution: Array<Record<string, string | number | null>>
+    ticker_volume_top: Array<Record<string, string | number | null>>
+    top_active_contracts: Array<Record<string, string | number | null>>
   }
   summary?: {
     current_total: number
@@ -98,8 +132,22 @@ export type DashboardResponse = {
     inactive_helper: SectionPayload
   }
   snapshot_meta?: {
+    dashboard_generated_at?: string | null
+    artifact_key?: string | null
+    cache_generated_at?: string | null
+    cache_refresh_status?: string | null
+    cache_last_attempt_at?: string | null
+    cache_last_success_at?: string | null
+    cache_last_error?: string | null
+    snapshot_time?: string | null
     latest_snapshot_time: string | null
     previous_snapshot_time: string | null
     comparison_mode?: string | null
+    window_start_time?: string | null
+    window_end_time?: string | null
+    raw_signature?: string | null
+    current_signature?: string | null
+    raw_refresh_id?: string | null
+    current_refresh_id?: string | null
   }
 }

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from stock.dashboard_api import mark_dashboard_projection_refresh_failed, refresh_dashboard_projection
 from stock.fetcher import fetch_stock_dataframe
 from stock.maintenance import run_maintenance
 from stock.repository import ingest_dataframe
@@ -24,6 +25,11 @@ def run_full() -> None:
     """主流程：拉取 → 校验/去重/入库 → 留存与 NEW 标记维护。"""
     run_ingestion()
     run_maintenance()
+    try:
+        refresh_dashboard_projection("stock")
+    except Exception as exc:
+        mark_dashboard_projection_refresh_failed("stock", error=str(exc))
+        print(f"[stock] dashboard projection refresh failed: {exc}")
 
 
 if __name__ == "__main__":

@@ -8,8 +8,13 @@ from stock import config
 
 def connect() -> sqlite3.Connection:
     config.DATA_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(config.DB_PATH)
+    conn = sqlite3.connect(config.DB_PATH, timeout=30)
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 30000")
+    try:
+        conn.execute("PRAGMA journal_mode = WAL")
+    except sqlite3.DatabaseError:
+        pass
     return conn
 
 
@@ -121,3 +126,46 @@ def ensure_current_state_table(conn: sqlite3.Connection, table: str) -> str:
     )
     conn.commit()
     return state_table
+
+
+def ensure_dashboard_projection_table(conn: sqlite3.Connection) -> str:
+    table = "dashboard_projection_cache"
+    conn.execute(
+        f'''
+        CREATE TABLE IF NOT EXISTS "{table}" (
+            dataset TEXT NOT NULL,
+            artifact_key TEXT NOT NULL,
+            raw_signature TEXT,
+            current_signature TEXT,
+            raw_refresh_id TEXT,
+            current_refresh_id TEXT,
+            snapshot_time TEXT,
+            window_start_time TEXT,
+            window_end_time TEXT,
+            refresh_status TEXT,
+            last_attempt_at TEXT,
+            last_success_at TEXT,
+            last_error TEXT,
+            generated_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            PRIMARY KEY (dataset, artifact_key)
+        )
+        '''
+    )
+    conn.execute(
+        f'CREATE INDEX IF NOT EXISTS "idx_{table}_dataset_generated" ON "{table}" ("dataset", "generated_at")'
+    )
+    info = conn.execute(f'PRAGMA table_info("{table}")').fetchall()
+    existing = {row[1] for row in info}
+    for col, ddl in [
+        ("raw_refresh_id", "TEXT"),
+        ("current_refresh_id", "TEXT"),
+        ("refresh_status", "TEXT"),
+        ("last_attempt_at", "TEXT"),
+        ("last_success_at", "TEXT"),
+        ("last_error", "TEXT"),
+    ]:
+        if col not in existing:
+            conn.execute(f'ALTER TABLE "{table}" ADD COLUMN "{col}" {ddl}')
+    conn.commit()
+    return table
